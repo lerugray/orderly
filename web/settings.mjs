@@ -499,6 +499,237 @@ function applyEdits(doc, edits) {
   return doc;
 }
 
+// Gate 2, for the engine-definition class only. An endpoint edit is not a model
+// edit — `baseUrl` decides where the gateway sends its traffic, `api` decides
+// how the answer is read, and `auth` decides what credential goes with it — so
+// it gets its own allowlist rather than being let in through the model-tag one.
+// This one permits exactly two shapes: a provider that did not exist before, and
+// model entries appended past the end of an existing provider's list. It cannot
+// express a change to anything that was already there.
+function engineDefinitionAllowlist(providerId, existingModelCount) {
+  const id = providerId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const patterns = [new RegExp(`^models\\.providers\\.${id}\\.(baseUrl|api|auth|authHeader|timeoutSeconds)$`)];
+  patterns.push(new RegExp(`^models\\.providers\\.${id}\\.apiKey\\.(source|provider|id)$`));
+  // Appended entries only. An index inside the existing range would be an edit
+  // to a model the operator already has, which is the other page's business.
+  patterns.push(
+    new RegExp(`^models\\.providers\\.${id}\\.models\\[(\\d+)\\]\\.(id|name|input\\[\\d+\\]|contextWindow|maxTokens)$`),
+  );
+  return (path) => {
+    for (const re of patterns) {
+      const m = re.exec(path);
+      if (!m) continue;
+      if (re.source.includes("models\\[")) {
+        const index = Number(/models\[(\d+)\]/.exec(path)?.[1]);
+        if (!Number.isInteger(index) || index < existingModelCount) return false;
+      }
+      return true;
+    }
+    return false;
+  };
+}
+
+const API_MODES = ["openai-completions"];
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// The second edge of the identity split. A definition names the environment
+// variable a provider's key is read from — the desk deals in NAMES, never
+// values, and no secret VALUE passes through here. But a NAME is not harmless
+// when the gateway process already holds that variable for something else: if a
+// definition names the gateway bearer or a channel token, a seat later pointed
+// at that provider would have the GATEWAY read the named variable and send it to
+// the definition's baseUrl — a credential the desk never saw, exfiltrated in a
+// second step from a definition it was allowed to store. So the desk must never
+// be the place a privileged secret gets wired into a provider definition, even
+// by name alone. Naming an ordinary provider key (a variable the operator adds
+// for the endpoint) stays allowed; the spec's own §6 keeps the credential-
+// reference-by-name path open for a genuinely authenticated operator endpoint.
+//
+// These names are refused whatever the config says, so the guarantee does not
+// depend on the config's shape staying the way it is today.
+const RESERVED_ENV_FLOOR = Object.freeze([
+  "OPENCLAW_GATEWAY_TOKEN", // the gateway bearer — operator-equivalent (README security posture)
+  "TELEGRAM_BOT_TOKEN", // the Telegram channel token — a station secret
+  "GOG_KEYRING_PASSWORD", // the mail agent's keyring password — a station secret
+]);
+
+// Reads the reserved set out of the config the write is about to touch, so a
+// station that renames its bearer or adds a channel is covered without a code
+// change. Three privileged positions hold an env-var NAME the gateway process
+// holds for something other than an ordinary provider key:
+//   - gateway.auth.token.id    the bearer, equivalent to operator access
+//   - channels.*.botToken.id   each channel's bot token
+//   - a sandbox container env NAME whose value is a never-commit placeholder,
+//     i.e. a secret the gateway injects into an agent (e.g. GOG_KEYRING_PASSWORD)
+function reservedEnvNames(doc) {
+  const reserved = new Set(RESERVED_ENV_FLOOR);
+  const bearer = doc?.gateway?.auth?.token?.id;
+  if (typeof bearer === "string") reserved.add(bearer);
+  for (const ch of Object.values(doc?.channels ?? {})) {
+    if (typeof ch?.botToken?.id === "string") reserved.add(ch.botToken.id);
+  }
+  for (const agent of Array.isArray(doc?.agents?.list) ? doc.agents.list : []) {
+    const env = agent?.sandbox?.docker?.env;
+    if (!isObj(env)) continue;
+    for (const [name, val] of Object.entries(env)) {
+      if (typeof val === "string" && /NEVER_COMMIT|^\s*<FROM_ENV/i.test(val)) reserved.add(name);
+    }
+  }
+  return reserved;
+}
+
+// The engine-definition edit: add a provider for an endpoint the operator runs,
+// or add a model tag to one they already added. It writes no credential VALUE —
+// `apiKeyEnv` is the NAME of an environment variable and nothing else — and a
+// local endpoint that needs no key is spelled `auth: "none"`, with no
+// placeholder key invented for it.
+export async function writeProviderDefinition({ configPath, definition }) {
+  if (!isObj(definition)) refuse("Nothing to define.");
+  for (const key of Object.keys(definition)) {
+    if (!["providerId", "baseUrl", "api", "auth", "apiKeyEnv", "timeoutSeconds", "models"].includes(key)) {
+      refuse(`"${key}" is not part of an engine definition.`);
+    }
+  }
+  const { providerId } = definition;
+  if (typeof providerId !== "string" || !/^[A-Za-z0-9_-]+$/.test(providerId)) {
+    refuse("A provider name may hold letters, digits, dashes and underscores.");
+  }
+  if (!API_MODES.includes(definition.api)) {
+    refuse(`This station speaks ${API_MODES.join(", ")} to an endpoint, and will not claim to speak anything else.`);
+  }
+  if (definition.auth !== "none" && definition.auth !== "api-key") {
+    refuse('A provider is either "none" — a local endpoint wanting no key — or "api-key".');
+  }
+  if (definition.auth === "api-key") {
+    if (typeof definition.apiKeyEnv !== "string" || !ENV_NAME_RE.test(definition.apiKeyEnv)) {
+      refuse("A key-using provider names the environment variable its key is read from.");
+    }
+  } else if (definition.apiKeyEnv !== undefined) {
+    refuse("A provider that needs no key names no environment variable.");
+  }
+  let parsed;
+  try {
+    parsed = new URL(definition.baseUrl);
+  } catch {
+    refuse("That endpoint isn't a readable web address.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    refuse("An endpoint is reached over http or https.");
+  }
+  if (parsed.username || parsed.password) {
+    refuse("That address carries a credential in it. Name an environment variable instead.");
+  }
+  if (definition.timeoutSeconds !== undefined) {
+    if (!Number.isInteger(definition.timeoutSeconds) || definition.timeoutSeconds < 1 || definition.timeoutSeconds > 600) {
+      refuse("A timeout is a whole number of seconds between 1 and 600.");
+    }
+  }
+  const models = definition.models;
+  if (!Array.isArray(models) || !models.length) refuse("An engine definition names at least one model tag.");
+  for (const m of models) {
+    if (!isObj(m)) refuse("Malformed model entry.");
+    for (const key of Object.keys(m)) {
+      if (!["id", "name", "contextWindow", "maxTokens"].includes(key)) {
+        refuse(`A model entry has no "${key}".`);
+      }
+    }
+    if (typeof m.id !== "string" || !TAG_RE.test(m.id)) refuse(`"${String(m.id).slice(0, 40)}" isn't a usable model tag.`);
+    if (m.name !== undefined && (typeof m.name !== "string" || !NAME_RE.test(m.name))) {
+      refuse("That model label isn't usable.");
+    }
+    if (!Number.isInteger(m.contextWindow) || m.contextWindow < 1) refuse(`${m.id} needs a contextWindow in tokens.`);
+    if (!Number.isInteger(m.maxTokens) || m.maxTokens < 1) refuse(`${m.id} needs a maxTokens in tokens.`);
+    if (m.maxTokens >= m.contextWindow) refuse(`${m.id} reserves more for the reply than its whole context window.`);
+  }
+
+  const raw = await readFile(configPath, "utf8");
+  const before = JSON.parse(raw);
+
+  // Before anything is built or stored: a key-using definition may not name a
+  // variable the gateway already holds as a secret. The desk stores only the
+  // NAME, but wiring a privileged NAME into a provider is a capability grant —
+  // a later seat would have the gateway read it and send it to this endpoint.
+  if (definition.auth === "api-key" && reservedEnvNames(before).has(definition.apiKeyEnv)) {
+    refuse(
+      `"${definition.apiKeyEnv}" is a credential the gateway already holds; it can't be wired in as a provider key from this desk. Name an ordinary provider key instead.`,
+    );
+  }
+
+  const after = JSON.parse(raw);
+  after.models ??= {};
+  after.models.providers ??= {};
+  const existing = before?.models?.providers?.[providerId];
+  const existingModels = Array.isArray(existing?.models) ? existing.models : [];
+
+  if (existing) {
+    // A provider that already exists may be extended, never redirected: its
+    // endpoint, protocol and credential reference are frozen below, and saying
+    // so here makes the refusal readable rather than a surprise at gate 3.
+    if (existing.baseUrl !== definition.baseUrl || existing.api !== definition.api) {
+      refuse(
+        `${providerId} already exists here and points somewhere else. This page adds an endpoint or adds a tag to one; it does not move an existing endpoint.`,
+      );
+    }
+    const known = new Set(existingModels.map((m) => m?.id));
+    const additions = models.filter((m) => !known.has(m.id));
+    if (!additions.length) refuse(`${providerId} already has ${models.length === 1 ? "that tag" : "those tags"}.`);
+    after.models.providers[providerId].models = [
+      ...existingModels,
+      ...additions.map((m) => ({
+        id: m.id,
+        ...(m.name ? { name: m.name } : {}),
+        input: ["text"],
+        contextWindow: m.contextWindow,
+        maxTokens: m.maxTokens,
+      })),
+    ];
+  } else {
+    const seen = new Set();
+    for (const m of models) {
+      if (seen.has(m.id)) refuse(`${providerId} would have two models tagged "${m.id}".`);
+      seen.add(m.id);
+    }
+    after.models.providers[providerId] = {
+      baseUrl: definition.baseUrl,
+      api: definition.api,
+      auth: definition.auth,
+      ...(definition.auth === "api-key"
+        ? { apiKey: { source: "env", provider: "default", id: definition.apiKeyEnv }, authHeader: true }
+        : {}),
+      timeoutSeconds: definition.timeoutSeconds ?? 120,
+      models: models.map((m) => ({
+        id: m.id,
+        ...(m.name ? { name: m.name } : {}),
+        input: ["text"],
+        contextWindow: m.contextWindow,
+        maxTokens: m.maxTokens,
+      })),
+    };
+  }
+
+  const allowed = engineDefinitionAllowlist(providerId, existingModels.length);
+  const changed = changedPaths(before, after);
+  if (!changed.length) refuse("Nothing changed.");
+  for (const path of changed) {
+    if (!allowed(path)) {
+      refuse(`Refused: that would have changed ${path}, which an engine definition may not touch.`);
+    }
+  }
+  // Gate 3, unchanged and shared with the ordinary edit: every guarded subtree,
+  // every existing agent, and every provider that was already here — including
+  // its credential reference — comes out byte-identical.
+  for (const path of [...FROZEN, ...frozenAgentPaths(before)]) {
+    if (JSON.stringify(at(before, path)) !== JSON.stringify(at(after, path))) {
+      refuse(`Refused: ${path} must not change.`);
+    }
+  }
+  if (after?.agents?.defaults?.sandbox?.mode !== "all") refuse("Refused: every session must stay sandboxed.");
+  if (after?.tools?.elevated?.enabled === true) refuse("Refused: elevated tools must stay off.");
+
+  const written = await persist(configPath, after);
+  return { changed, ...written };
+}
+
 async function pruneBackups(dir, keep) {
   try {
     const names = (await readdir(dir))
@@ -542,14 +773,21 @@ export async function writeSettings({ configPath, edits }) {
     refuse("Refused: elevated tools must stay off.");
   }
 
+  const written = await persist(configPath, after);
+  return { changed, ...written };
+}
+
+// Back up beside the file, write a temp file, fsync, rename. Atomic: a full
+// file appears at the real path or nothing does, because a half-written config
+// would take the station down until someone noticed. Shared by both edit
+// classes so neither can drift into a less careful write.
+async function persist(configPath, after) {
   const dir = dirname(configPath);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backup = `openclaw.json.orderly-bak-${stamp}`;
   const info = await stat(configPath);
   await copyFile(configPath, join(dir, backup));
 
-  // Atomic: a full file appears at the real path or nothing does. A half-written
-  // config would take the station down until someone noticed.
   const tmp = join(dir, `.openclaw.json.orderly-tmp-${process.pid}-${Date.now()}`);
   const body = `${JSON.stringify(after, null, 2)}\n`;
   await writeFile(tmp, body, { mode: info.mode & 0o777 });
@@ -562,7 +800,7 @@ export async function writeSettings({ configPath, edits }) {
   await rename(tmp, configPath);
   await pruneBackups(dir, 10);
 
-  return { changed, backup, bytes: Buffer.byteLength(body) };
+  return { backup, bytes: Buffer.byteLength(body) };
 }
 
 export { Refused };

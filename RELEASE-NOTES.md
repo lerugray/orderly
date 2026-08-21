@@ -1,5 +1,52 @@
 # Release notes
 
+## v0.3.0
+
+### Named persistent agents
+
+A new **Agents** page lets you stand up named agents alongside the built-in desks. Give one
+a name, a short description and a handle, and it gets its own thread on the station sidebar:
+a standing identity with its own memory, rather than a one-off conversation.
+
+Creation is credential-free by construction. The form takes only a name, a description, a
+handle and a memory policy — nothing else is accepted, and a name or description that reads
+like a filesystem path, a URL, an environment assignment or a credential is refused outright
+rather than silently stored. Every change that matters to trust — renaming, re-describing,
+suspending, resuming, retiring, removing — shows a plain confirmation of exactly what it
+grants first: network, credentials, delegation, capabilities. An agent that grants none of
+those says so, in those words, before you confirm anything. Retiring an agent keeps its
+transcript, memory and audit trail; a removed handle stays reserved, so a name can never
+later land on a different identity.
+
+This is the first milestone. Per-agent sandboxes, delegation to the mail and research
+agents, @-mentions, group agents, and attaching a named agent to its own Telegram bot are
+next, not yet — today, a named agent talks to you only on the station's own desk.
+
+### Local-model seats
+
+A seat can now be pointed at a model you run yourself — Ollama, llama.cpp, LM Studio, vLLM,
+or anything else that speaks the OpenAI-compatible chat API — on this machine, your LAN, or
+your tailnet. ORDERLY still runs no inference of its own: an engine is just an endpoint you
+already have, configured the same way a cloud provider always has been, and an endpoint that
+wants no credential is never asked to supply one. Before an engine is offered to a seat it's
+probed end to end: reachability, the exact model tag, a real completion with no fabricated
+credential in the request.
+
+What a seat is trusted to do is stated honestly rather than assumed. The **chat-research**
+tier is fully live, including a single tool call where a probe has actually watched that
+engine make one. Ask more of it than that and the seat says so — what was asked, what tier
+it's running, what's missing — rather than doing one step and calling the job done. The
+**chained-task** tier is present in the configuration format and refused everywhere it
+matters: the harness it depends on isn't built yet, and naming it in configuration produces a
+plain error saying exactly that. The **coding lane** is not a model choice at all — that's
+the orchestrator desk's own dispatch path, and no locally configured engine is ever a route
+onto it.
+
+### Also in this release
+
+- The installer (`web/deploy/install.sh`) now installs the two new modules — `agents.mjs`
+  and `engines.mjs` — as part of a normal install or upgrade, no separate step required.
+
 ## v0.2.1
 
 ### Mascot picker fixed

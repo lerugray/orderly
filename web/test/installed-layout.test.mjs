@@ -53,7 +53,15 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   t.after(() => rm(scratch, { recursive: true, force: true }));
 
   const appFiles = await installedAppFiles();
-  assert.deepEqual(appFiles, ["server.mjs", "settings.mjs", "queue.mjs", "calendar.mjs", "dashboard.mjs"]);
+  assert.deepEqual(appFiles, [
+    "server.mjs",
+    "settings.mjs",
+    "queue.mjs",
+    "calendar.mjs",
+    "dashboard.mjs",
+    "agents.mjs",
+    "engines.mjs",
+  ]);
   for (const file of appFiles) await cp(resolve(WEB, file), join(installed, file));
   await cp(resolve(WEB, "public"), join(installed, "public"), { recursive: true });
 
@@ -61,7 +69,28 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   // settings read without making the flat install depend on the developer's HOME.
   await writeFile(join(serviceHome, ".openclaw", "openclaw.json"), JSON.stringify({
     gateway: { mode: "local", reload: { mode: "hybrid" } },
-    agents: { defaults: { model: { primary: "openai/gpt-5" } }, list: [] },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          auth: "api-key",
+          apiKey: { source: "env", provider: "default", id: "OPENAI_API_KEY" },
+          models: [{ id: "gpt-5", name: "GPT-5", input: ["text"], contextWindow: 128000, maxTokens: 8192 }],
+        },
+      },
+    },
+    agents: { defaults: { model: { primary: "openai/gpt-5" } }, list: [{ id: "coordinator" }] },
+  }));
+
+  // The seat-engine overlay is host state too, and it is read by a module the
+  // flat install has to have shipped. A file the installer forgets is exactly
+  // the failure this whole test exists to catch.
+  await mkdir(join(serviceHome, ".orderly"), { recursive: true });
+  await writeFile(join(serviceHome, ".orderly", "engines.json"), JSON.stringify({
+    version: 1,
+    models: { "openai/gpt-5": { toolProtocol: "openai-tools", tiers: ["chat-research"] } },
+    seats: { defaults: { capabilityTier: "chat-research", contextBudget: 32000 } },
   }));
 
   const child = spawn(process.execPath, [join(installed, "server.mjs")], {
@@ -72,6 +101,10 @@ test("the install.sh flat layout serves every shipped identity and settings", as
       ORDERLY_WEB_PORT: "0",
       ORDERLY_GATEWAY_PORT: "0",
       ORDERLY_SETTINGS_WRITE: "off",
+      // Named agents write host state, so the flat install is pointed at the
+      // scratch home rather than the developer's — and the assertions below
+      // check that a station nobody has named an agent on writes nothing here.
+      ORDERLY_AGENTS_ROOT: join(serviceHome, ".orderly", "agents"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -127,6 +160,20 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   assert.equal(settingsApi.status, 200, settingsBody);
   assert.equal(settingsBody.includes("expects it"), false);
 
+  // The engines readout, in the flat layout, against real host state: the seat
+  // resolves, the classification is read, and no credential value appears.
+  const enginesApi = await get("/api/engines");
+  const enginesBody = await enginesApi.text();
+  assert.equal(enginesApi.status, 200, enginesBody);
+  const engines = JSON.parse(enginesBody);
+  assert.equal(engines.configured, true);
+  assert.deepEqual(engines.problems, []);
+  const seat = engines.seats.find((s) => s.seat === "coordinator");
+  assert.equal(seat.modelRef, "openai/gpt-5");
+  assert.equal(seat.capabilityTier, "chat-research");
+  assert.equal(seat.credentialRef, "OPENAI_API_KEY");
+  assert.equal(enginesBody.includes("apiKey"), false);
+
   const station = await get("/");
   const stationHtml = await station.text();
   assert.equal(station.status, 200);
@@ -149,6 +196,54 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   const stationSource = await stationModule.text();
   assert.match(stationSource, /data-themed-mascot/);
   assert.match(stationSource, /bindMascot\(visibleMascot\(\)\)/);
+
+  // The agents surface, in a flat install. The module is copied beside the
+  // server rather than imported from a parent — the whole reason APP_FILES is
+  // asserted above — and its page, its script and its two API routes all serve.
+  const agentsPage = await get("/agents");
+  assert.equal(agentsPage.status, 200);
+  const agentsHtml = await agentsPage.text();
+  assert.match(agentsHtml, /<title>Agents · ORDERLY<\/title>/);
+  assert.match(agentsHtml, /src="\/agents\.js"/);
+  // A handle in the address bar is a desk route the page resolves, never a
+  // filesystem path: every /agents/* serves the same file.
+  const deepRoute = await get("/agents/reading-log");
+  assert.equal(deepRoute.status, 200);
+  assert.equal(await deepRoute.text(), agentsHtml);
+
+  const agentsModule = await get("/agents.js");
+  assert.equal(agentsModule.status, 200);
+  const agentsSource = await agentsModule.text();
+  // The management page draws no control this surface must not have (§5.1).
+  for (const forbidden of [/type="password"/, /API[_ ]?KEY/i, /Dockerfile/i, /"image"/]) {
+    assert.doesNotMatch(agentsSource, forbidden, `the agents page offers ${forbidden}`);
+  }
+
+  const roster = await get("/api/agents");
+  assert.equal(roster.status, 200);
+  const rosterBody = await roster.json();
+  assert.equal(rosterBody.state, "ok");
+  // §6.1 — the fixed trio are in the same roster, and marked as the station's.
+  assert.deepEqual(
+    rosterBody.system.map((agent) => agent.id),
+    ["coordinator", "mail", "orchestration"],
+  );
+  assert.ok(rosterBody.system.every((agent) => agent.systemLocked === true));
+  // Migration §6: a station nobody has named an agent on has none, and has
+  // written nothing to disk to say so.
+  assert.deepEqual(rosterBody.agents, []);
+  assert.equal(rosterBody.counts.named, 0);
+  assert.equal(
+    await readFile(join(serviceHome, ".orderly", "agents", "identity-manifest.json"), "utf8").then(
+      () => "written",
+      () => "absent",
+    ),
+    "absent",
+    "reading the roster must not create host state",
+  );
+
+  const missing = await get("/api/agents/thread?agent=a-doesnotexist1");
+  assert.equal(missing.status, 404);
 
   assert.equal(ready.stderr(), "");
 });

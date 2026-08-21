@@ -245,7 +245,7 @@ const sendText = el("send-text");
 const railStack = el("rail-stack");
 const railEmpty = el("rail-empty");
 const deskNote = el("desk-note");
-const deskOpts = Array.from(document.querySelectorAll(".desks__opt"));
+const deskOpts = () => Array.from(document.querySelectorAll(".desks__opt"));
 
 const DESK_COPY = {
   coordinator: {
@@ -264,6 +264,21 @@ const DESK_COPY = {
     hint: "Enter sends · he reads and drafts, he never sends",
   },
 };
+
+// --- named agents (spec §3.1) ----------------------------------------------
+//
+// One desk per active named agent, keyed `agent:<id>` — the immutable id, never
+// the handle, because a rename must not move a thread. Their conversations do
+// NOT live in this browser: the station owns each transcript, so a named desk
+// survives a reload, a cleared browser and a different machine on the tailnet,
+// which is exactly what the fixed desks do not do and have never claimed to.
+const AGENT_DESK = /^agent:(a-[a-z0-9]{8,40})$/;
+const namedAgents = new Map(); // desk key -> the sanitised record
+const hydrated = new Set(); // desk keys whose transcript has been fetched
+
+function agentIdFor(key) {
+  return AGENT_DESK.exec(key)?.[1] ?? null;
+}
 
 let desk = "coordinator";
 let busy = false;
@@ -366,7 +381,15 @@ function saveStore() {
     try {
       window.localStorage.setItem(
         STORE_KEY,
-        JSON.stringify({ v: 1, live: histories, threads, archive }),
+        JSON.stringify({
+          v: 1,
+          // The two fixed desks and no more: a named agent's transcript belongs
+          // to the station (spec §4.1), and a second copy in this browser could
+          // only ever disagree with it.
+          live: { coordinator: histories.coordinator, mail: histories.mail },
+          threads,
+          archive,
+        }),
       );
       return;
     } catch {
@@ -442,16 +465,21 @@ function updateComposer() {
     el("composer-hint").textContent = DESK_COPY[desk].hint;
   }
   const archiveBtn = el("thread-archive");
-  if (archiveBtn) archiveBtn.disabled = Boolean(viewing) || busy || !histories[desk].length;
+  if (archiveBtn) {
+    archiveBtn.disabled =
+      Boolean(agentIdFor(desk)) || Boolean(viewing) || busy || !(histories[desk] ?? []).length;
+  }
   if (typeof updateDay === "function") updateDay();
 }
 
 function setDesk(next) {
   if (busy || !DESK_COPY[next]) return;
   desk = next;
+  histories[next] ??= [];
   viewing = null;
+  if (agentIdFor(next) && !hydrated.has(next)) hydrateAgentThread(next);
   drawReading();
-  for (const opt of deskOpts) {
+  for (const opt of deskOpts()) {
     const on = opt.dataset.desk === desk;
     opt.classList.toggle("is-on", on);
     opt.setAttribute("aria-checked", String(on));
@@ -718,7 +746,7 @@ function drawNudge(who) {
 
 function drawThread() {
   thread.textContent = "";
-  const log = viewing ? viewing.turns : histories[desk];
+  const log = viewing ? viewing.turns : (histories[desk] ?? []);
   const label = viewing ? DESK_COPY[viewing.desk].label : DESK_COPY[desk].label;
   if (!log.length) {
     thread.appendChild(threadEmpty);
@@ -752,11 +780,14 @@ function drawArchive() {
   if (!list || !note || !toggle) return;
 
   toggle.textContent = archive.length ? `Archive (${archive.length})` : "Archive";
-  el("thread-archive").disabled = Boolean(viewing) || busy || !histories[desk].length;
+  el("thread-archive").disabled =
+    Boolean(agentIdFor(desk)) || Boolean(viewing) || busy || !(histories[desk] ?? []).length;
 
-  bar.textContent = storageWorks
-    ? "Threads are kept in this browser only — never on the station."
-    : "This browser won't keep threads: storage is unavailable, so a reload loses the conversation.";
+  bar.textContent = agentIdFor(desk)
+    ? "This thread is kept on the station, so it survives a reload and a cleared browser."
+    : storageWorks
+      ? "Threads are kept in this browser only — never on the station."
+      : "This browser won't keep threads: storage is unavailable, so a reload loses the conversation.";
 
   list.textContent = "";
   if (!archive.length) {
@@ -899,7 +930,18 @@ async function send(text) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ desk: at, thread: threadFor(at), stream: true, messages: histories[at] }),
+      body: JSON.stringify(
+        agentIdFor(at)
+          ? {
+              // The station holds this agent's session AND its transcript, so a
+              // handful of turns is plenty — and stays well inside the front
+              // door's own conversation caps however long the thread has grown.
+              agent: agentIdFor(at),
+              stream: true,
+              messages: histories[at].slice(-8),
+            }
+          : { desk: at, thread: threadFor(at), stream: true, messages: histories[at] },
+      ),
     });
 
     if (!res.ok) {
@@ -969,9 +1011,92 @@ async function send(text) {
 
 // --- wiring ---
 
-for (const opt of deskOpts) {
+function wireDesk(opt) {
   opt.addEventListener("click", () => setDesk(opt.dataset.desk));
 }
+for (const opt of deskOpts()) wireDesk(opt);
+
+// --- the named-agent desks -------------------------------------------------
+//
+// §3.1: one entry per ACTIVE named agent, routed by immutable id. A pending or
+// suspended identity is deliberately absent — it is managed on /agents, and a
+// desk button for something that would refuse to answer is worse than none.
+
+async function loadAgents() {
+  let roster;
+  try {
+    const res = await fetch("/api/agents", { headers: { Accept: "application/json" } });
+    roster = await res.json();
+  } catch {
+    return; // no roster is the station as it has always been
+  }
+  const active = (roster?.agents || []).filter((agent) => agent.lifecycle === "active");
+  const strip = document.querySelector(".desks");
+  const note = deskNote;
+  if (!strip) return;
+
+  for (const agent of active) {
+    const key = `agent:${agent.id}`;
+    namedAgents.set(key, agent);
+    histories[key] ??= [];
+    DESK_COPY[key] = {
+      label: agent.name,
+      note:
+        (agent.description ? `${agent.description} ` : "") +
+        "Its own conversation, kept on the station. It holds no credential, no mailbox and no " +
+        "delegation — if you need mail, the calendar or the web, ask the coordinator.",
+      hint: "Enter sends · this thread is kept on the station",
+    };
+    if (strip.querySelector(`[data-desk="${key}"]`)) continue;
+    const button = document.createElement("button");
+    button.className = "desks__opt";
+    button.type = "button";
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", "false");
+    button.dataset.desk = key;
+    button.textContent = agent.name;
+    strip.insertBefore(button, note);
+    wireDesk(button);
+  }
+
+  // Outside the radiogroup, deliberately: a focusable link among the radios
+  // would be one more stop in the arrow-key cycle that answers to none of them.
+  if (active.length && !document.querySelector(".desks__manage")) {
+    const link = document.createElement("a");
+    link.className = "desks__manage";
+    link.href = "/agents";
+    link.textContent = "Manage agents";
+    strip.insertAdjacentElement("afterend", link);
+  }
+}
+
+// The station's copy is the copy. It is read once per desk and then kept in
+// step by what this page sends and receives, so opening an agent does not cost
+// a round trip every time.
+async function hydrateAgentThread(key) {
+  const id = agentIdFor(key);
+  if (!id) return;
+  hydrated.add(key);
+  try {
+    const res = await fetch(`/api/agents/thread?agent=${encodeURIComponent(id)}`, {
+      headers: { Accept: "application/json" },
+    });
+    const payload = await res.json();
+    const turns = cleanTurns(payload?.turns);
+    if (!turns.length) return;
+    // Anything typed while the fetch was in flight stays at the end of the
+    // thread rather than being replaced by the station's older view.
+    const live = histories[key] ?? [];
+    const known = new Set(turns.map((turn) => `${turn.role}:${turn.content}`));
+    histories[key] = [...turns, ...live.filter((turn) => !known.has(`${turn.role}:${turn.content}`))];
+    if (desk === key && !viewing) drawThread();
+  } catch {
+    // A transcript that cannot be read leaves the thread empty rather than
+    // wrong; the next thing said is still recorded on the station.
+  }
+}
+
+loadAgents();
 
 el("thread-archive")?.addEventListener("click", () => {
   if (busy || viewing) return;

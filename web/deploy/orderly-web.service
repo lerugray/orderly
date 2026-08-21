@@ -35,6 +35,23 @@ Environment=ORDERLY_BROKER_SOCKET=/var/lib/orderly-broker/.orderly/broker.sock
 # not disclose them.
 Environment=ORDERLY_CALENDAR_SOCKET=/var/lib/orderly-calendar/calendar.sock
 
+# Named persistent agents — the identity manifest and per-agent state.
+#
+# This holds NO credential and cannot hold one: an agent record is a name, a
+# purpose, a handle and a memory policy, and web/agents.mjs refuses anything
+# that reads like a path, an endpoint, an environment assignment or a secret
+# before it reaches the disk. It is host state of the same class as the
+# approval queue's decision store — what the OPERATOR declared, kept where a
+# model cannot read or forge it.
+#
+# SPEC-NAMED-AGENTS §1.1 puts this under the gateway's own home once each
+# identity has a sandbox to own, because at that point the record carries
+# security-defining fields. This milestone creates no sandbox and grants no
+# capability, so there is nothing here for the gateway to be the owner OF —
+# and the front door cannot write into an identity it is deliberately not.
+# Point this at the gateway-owned path when that milestone lands.
+Environment=ORDERLY_AGENTS_ROOT=/var/lib/orderly-web/.orderly/agents
+
 # The gateway bearer.
 #
 # The wrapper below still lifts exactly one variable out of ~/.openclaw/.env,

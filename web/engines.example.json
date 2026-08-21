@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy to ~/.orderly/engines.json (or point ORDERLY_ENGINES_CONFIG at it). This file holds only what the gateway has no concept of: which tier a model has been reviewed for, what tool protocol it actually speaks, and each seat's effective context budget. Endpoints, credentials and model choice stay in the gateway's own openclaw.json.",
+  "version": 1,
+  "models": {
+    "ollama-cloud-openai/glm-5.2": {
+      "toolProtocol": "openai-tools",
+      "tiers": ["chat-research"],
+      "note": "Reviewed 2026-08-21: one tool call per turn, reliably."
+    },
+    "local-ollama/llama3.1:8b": {
+      "toolProtocol": "none",
+      "tiers": ["chat-research"],
+      "note": "A 7B-class model on the operator's own box. It answers; it does not call tools."
+    }
+  },
+  "seats": {
+    "defaults": {
+      "capabilityTier": "chat-research",
+      "contextBudget": 32000
+    },
+    "researcher": {
+      "capabilityTier": "chat-research",
+      "contextBudget": 6000,
+      "note": "Pointed at the local endpoint, with a budget that fits its 8k window beside its reply."
+    }
+  }
+}

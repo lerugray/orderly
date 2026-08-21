@@ -283,7 +283,7 @@ else
   fi
 fi
 
-APP_FILES="server.mjs settings.mjs queue.mjs calendar.mjs dashboard.mjs"
+APP_FILES="server.mjs settings.mjs queue.mjs calendar.mjs dashboard.mjs agents.mjs engines.mjs"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "dry run: installing from $SRC -> $DEST"

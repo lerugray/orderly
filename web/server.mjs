@@ -26,6 +26,13 @@
 //   ORDERLY_BROKER_SOCKET    orchestration broker UNIX socket (default
 //                            ~/.orderly/broker.sock). The operator credential
 //                            arrives per request and is only forwarded.
+//   ORDERLY_ENGINES_CONFIG   host-owned seat-engine classifications (default
+//                            ~/.orderly/engines.json). Holds which tier a model
+//                            has been reviewed for, what tool protocol it
+//                            actually speaks, and each seat's context budget.
+//                            Endpoints, credentials and model choice stay in
+//                            the gateway's own config; nothing is editable in
+//                            both places.
 //   ORDERLY_DASHBOARD_CONFIG explicit, host-owned quota subscription config
 //                            (default ~/.orderly/dashboard-subscriptions.json).
 //   ORDERLY_DASHBOARD_CACHE  normalized mode-0600 snapshot cache (default
@@ -42,7 +49,30 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readSettings, writeSettings, Refused } from "./settings.mjs";
+import { readSettings, writeSettings, writeProviderDefinition, Refused } from "./settings.mjs";
+import {
+  activateAgent,
+  AgentsRefused,
+  appendTurns,
+  createAgent,
+  findAgent,
+  listAgents,
+  readTranscript,
+  removeAgent,
+  setLifecycle,
+  updateAgent,
+} from "./agents.mjs";
+import {
+  HARNESSES,
+  EngineRefused,
+  applyEngineEdits,
+  checkOperation,
+  describeEngine,
+  probeEngine,
+  readEngineConfig,
+  resolveSeatEngine,
+  validateEngineConfig,
+} from "./engines.mjs";
 import { readQueue, decide, observeDraft, observeProposal, QueueRefused } from "./queue.mjs";
 import { applyProposal, calendarConfigured, CalendarRefused } from "./calendar.mjs";
 import {
@@ -94,6 +124,8 @@ const SERVICE = "orderly-gateway.service";
 const BROKER_SOCKET =
   process.env.ORDERLY_BROKER_SOCKET ||
   join(process.env.HOME || "", ".orderly", "broker.sock");
+const ENGINES_CONFIG =
+  process.env.ORDERLY_ENGINES_CONFIG || join(process.env.HOME || "", ".orderly", "engines.json");
 const DASHBOARD_CONFIG =
   process.env.ORDERLY_DASHBOARD_CONFIG ||
   join(process.env.HOME || "", ".orderly", "dashboard-subscriptions.json");
@@ -104,6 +136,17 @@ const DASHBOARD_CACHE =
 // declaring source codexbar-loopback are read from here, so this service needs
 // no provider credential of its own. Asserted loopback in dashboard.mjs.
 const CODEXBAR_ENDPOINT = process.env.ORDERLY_CODEXBAR_ENDPOINT || DEFAULT_CODEXBAR_ENDPOINT;
+// Named persistent agents — the identity manifest and per-agent state. Host
+// state owned by whichever identity the deployment gives it, exactly like the
+// approval queue's decision store and for the same reason: what the OPERATOR
+// declared must not be something a model can read or forge. The layout beneath
+// this root is the spec's; see web/agents.mjs.
+const AGENTS_ROOT =
+  process.env.ORDERLY_AGENTS_ROOT || join(process.env.HOME || "", ".orderly", "agents");
+// The upstream seat a named agent's thread is answered by, until the sandbox
+// milestone gives each identity one of its own. Named here rather than buried
+// so that swapping it is a deployment change, not a code change.
+const AGENT_SEAT = process.env.ORDERLY_AGENT_SEAT || "openclaw/coordinator";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -323,6 +366,98 @@ const CARD_CONTRACT = [
   "number or restate the items in the prose. The block carries the detail; you carry the read.",
 ].join("\n");
 
+// ---------------------------------------------------------------------------
+// named persistent agents — §3.1 routing and §6.3's DESKS projection
+// ---------------------------------------------------------------------------
+//
+// §6.1 puts coordinator, mail and researcher into the same roster as the named
+// agents, and §6.3 demotes DESKS from a source of identity to a presentation
+// projection. Both are done here in the smallest way that is true: the fixed
+// three are SYNTHESISED from the desks that already exist and are marked
+// systemLocked, so the roster is one list — and not one byte of a
+// credential-bearing identity is written to disk by this process. A station
+// whose operator creates no named agent therefore keeps no agent files at all,
+// and behaves exactly as it did before this milestone.
+const SYSTEM_AGENTS = [
+  {
+    id: "coordinator",
+    desk: "coordinator",
+    name: "Coordinator",
+    handle: "coordinator",
+    path: "/",
+    description:
+      "The everyday desk. Handles anything and hands specialist work to the mail agent or the researcher.",
+    lifecycle: "active",
+    agentClass: "system",
+    memoryPolicy: "persistent",
+    systemLocked: true,
+    capabilities: ["reminders", "delegation"],
+    channels: ["web-desk", "telegram"],
+    sandbox: { provisioned: true, profile: "coordinator" },
+  },
+  {
+    id: "mail",
+    desk: "mail",
+    name: "Mail desk",
+    handle: "mail",
+    path: "/",
+    description:
+      "The mail agent, asked directly. Reads both inboxes and the calendar, and writes drafts. It cannot send.",
+    lifecycle: "active",
+    agentClass: "system",
+    memoryPolicy: "memoryless",
+    systemLocked: true,
+    capabilities: ["mail-read", "calendar-read", "drafts"],
+    channels: ["web-desk"],
+    sandbox: { provisioned: true, profile: "mail" },
+  },
+  {
+    id: "orchestration",
+    desk: "orchestration",
+    name: "Orchestration seat",
+    handle: "orchestration",
+    path: "/orchestration",
+    description:
+      "The dispatch seat. Its authority lives behind the broker socket, not on this page.",
+    lifecycle: "active",
+    agentClass: "system",
+    memoryPolicy: "memoryless",
+    systemLocked: true,
+    capabilities: ["dispatch-proposals"],
+    channels: ["web-desk"],
+    sandbox: { provisioned: true, profile: "orchestrator" },
+  },
+];
+
+// A named agent's thread is its own upstream session, built here rather than by
+// the browser — the same construction as sessionKeyFor, so the gateway's
+// reserved namespaces stay unreachable from a page.
+export function agentSessionKey(id) {
+  return `orderly-web:agent:${id}`;
+}
+
+// §4.1 and §2.2 as a preamble. Note what is NOT here: the card contract. A
+// named agent has no mailbox and no calendar, so inviting it to emit a draft or
+// an event proposal would put a card on the approval queue from an identity
+// that holds no capability to have produced it. The queue is for work the mail
+// desk actually did.
+export function agentSystemPrompt(agent) {
+  return [
+    `You are "${agent.name}", a named identity on a private, single-operator station.`,
+    agent.description
+      ? `Your standing purpose, in the operator's own words: ${agent.description}`
+      : "The operator has not written your purpose down yet. Ask him for it.",
+    "",
+    "You have your own conversation and your own transcript, kept on this station.",
+    "You hold no credential, no network of your own, and no delegation: you may not ask",
+    "the mail agent, the researcher or any other identity to do work for you. If something",
+    "needs a capability you do not have, say so plainly and stop — do not describe a way around it.",
+    "",
+    "Reply in plain prose, briefly. Do not use markdown tables. Never emit fenced blocks",
+    "tagged orderly-card; that surface belongs to identities that can actually act.",
+  ].join("\n");
+}
+
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_TURNS = 40;
 const MAX_MESSAGE_CHARS = 6000;
@@ -414,23 +549,71 @@ async function handleChat(req, res) {
     return jsonError(res, 400, "Unreadable request.");
   }
 
+  // A named agent, when one is asked for. Everything below this block is the
+  // path that already existed: with no `agent` in the request, `named` is null
+  // and not one line of the old behaviour changes.
+  let named = null;
+  if (typeof payload?.agent === "string" && payload.agent) {
+    try {
+      named = await findAgent({ root: AGENTS_ROOT, id: payload.agent });
+    } catch {
+      named = null;
+    }
+    if (!named) return jsonError(res, 404, "That isn't an agent on this station.");
+    if (named.lifecycle !== "active") {
+      return jsonError(
+        res,
+        409,
+        named.lifecycle === "retired"
+          ? `${named.name} has been retired. Its thread can be read, not continued.`
+          : `${named.name} isn't active — resume it on the Agents page before talking to it.`,
+      );
+    }
+  }
+
   const desk = DESKS[payload?.desk] ? payload.desk : DEFAULT_DESK;
   const checked = sanitiseMessages(payload?.messages);
   if (checked.error) return jsonError(res, 400, checked.error);
   const wantsStream = payload?.stream !== false;
-  const thread = sessionKeyFor(desk, payload?.thread);
+  const thread = named ? agentSessionKey(named.id) : sessionKeyFor(desk, payload?.thread);
+
+  // The tier gate, and the disclosure that rides with the answer. Ordinary chat
+  // is inside every tier, so this refuses almost nothing — but it is where a
+  // seat whose engine speaks no tool protocol, or whose classification is
+  // broken, gets told so in words instead of being quietly asked anyway.
+  // A named agent declares a `seat` of its own but cannot fill it in this
+  // milestone, so it is gated and disclosed as what actually answers it: the
+  // coordinator's seat. When that field becomes settable the ref moves here and
+  // nothing else in this path changes.
+  const gate = await gateSeat(named ? AGENT_SEAT : DESKS[desk], "chat");
+  if (!gate.allowed) return jsonError(res, 403, engineRefusalText(gate.refusal));
+  discloseEngine(res, gate);
 
   const upstreamBody = JSON.stringify({
-    model: DESKS[desk],
+    model: named ? AGENT_SEAT : DESKS[desk],
     stream: wantsStream,
     // With a session upstream the gateway already holds the conversation, so
     // only the new question crosses. Without one the page's own history is the
     // only memory there is, so all of it does.
     messages: [
-      { role: "system", content: CARD_CONTRACT },
+      { role: "system", content: named ? agentSystemPrompt(named) : CARD_CONTRACT },
       ...(thread ? checked.messages.slice(-1) : checked.messages),
     ],
   });
+
+  // §4.1 — a named agent's transcript is owned and written by the station, not
+  // by the browser and not by the agent. The question is recorded as it goes
+  // out, so a reply that never arrives still leaves the thread honest about
+  // what was asked.
+  const question = checked.messages[checked.messages.length - 1];
+  const record = (turns) => {
+    if (!named) return;
+    appendTurns({ root: AGENTS_ROOT, id: named.id, turns }).catch(() => {
+      // A transcript that cannot be written is reported by the thread endpoint,
+      // not by breaking the conversation it was trying to remember.
+    });
+  };
+  record([question]);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
@@ -477,7 +660,10 @@ async function handleChat(req, res) {
     clearTimeout(timer);
     try {
       const reply = JSON.parse(text)?.choices?.[0]?.message?.content;
-      if (typeof reply === "string") fileDrafts(reply, desk);
+      if (typeof reply === "string") {
+        if (named) record([{ role: "assistant", content: reply }]);
+        else fileDrafts(reply, desk);
+      }
     } catch {
       /* not our business: the reply still goes back verbatim */
     }
@@ -504,17 +690,30 @@ async function handleChat(req, res) {
   // the path. Nothing about the browser's copy changes — a failure to parse here
   // is silent by design, because bookkeeping must never damage the conversation.
   let seen = "";
+  // A TextDecoder, not chunk.toString("utf8"): fetch hands back plain
+  // Uint8Arrays, whose toString ignores the encoding argument and returns the
+  // bytes as decimal numbers — so the watcher below was reading "100,97,116,97"
+  // where it expected "data:", found no frames, and quietly filed nothing from
+  // any streamed reply. Streaming is what the page actually uses. `stream: true`
+  // also keeps a multi-byte character split across two chunks intact.
+  const decoder = new TextDecoder();
   try {
     for await (const chunk of upstream.body) {
       res.write(chunk);
-      if (seen.length < MAX_BODY_BYTES) seen += chunk.toString("utf8");
+      if (seen.length < MAX_BODY_BYTES) seen += decoder.decode(chunk, { stream: true });
     }
+    seen += decoder.decode();
   } catch {
     // The operator closed the tab or the gateway dropped: nothing to say.
   } finally {
     clearTimeout(timer);
     res.end();
-    fileDrafts(replyFromStream(seen), desk);
+    const reply = replyFromStream(seen);
+    // A named agent's reply is filed to ITS transcript and reaches the approval
+    // queue by no path at all: it holds no mailbox and no calendar, so a card
+    // from it would be a request from an identity with nothing to make it with.
+    if (named) record([{ role: "assistant", content: reply }]);
+    else fileDrafts(reply, desk);
   }
 }
 
@@ -557,6 +756,446 @@ function fileDrafts(text, desk) {
     }
     if (prose === rest) return;
     rest = prose;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// the agents roster — §5.1's management surface, as five bounded verbs
+// ---------------------------------------------------------------------------
+//
+// What this surface deliberately has no field for: credentials, environment
+// variables, filesystem paths, Docker images, network settings, shell input,
+// plugin toggles. §5.1 lists them; the typed envelope in agents.mjs is what
+// makes the absence structural rather than a matter of which form was drawn.
+//
+// `orderly-web` submits bounded management requests and holds no writable mount
+// into any agent's runtime, because in this milestone no agent HAS a runtime.
+
+export const AGENT_ACTIONS = ["create", "activate", "update", "lifecycle", "remove"];
+
+export async function agentsRoster({ root, systemAgents }) {
+  const named = await listAgents({ root });
+  return {
+    state: "ok",
+    system: systemAgents,
+    agents: named,
+    counts: {
+      named: named.length,
+      active: named.filter((agent) => agent.lifecycle === "active").length,
+      pending: named.filter((agent) => agent.lifecycle === "pending").length,
+    },
+    readAt: new Date().toISOString(),
+  };
+}
+
+async function handleAgentsGet(_req, res) {
+  try {
+    sendJson(res, 200, await agentsRoster({ root: AGENTS_ROOT, systemAgents: SYSTEM_AGENTS }));
+  } catch (err) {
+    sendJson(res, 200, {
+      state: "error",
+      system: SYSTEM_AGENTS,
+      agents: [],
+      counts: { named: 0, active: 0, pending: 0 },
+      error:
+        err instanceof AgentsRefused
+          ? err.message
+          : "The agent roster couldn't be read on the station. Nothing was changed.",
+    });
+  }
+}
+
+// One writer at a time and not on a hair trigger, the same shape the settings
+// write uses — creating an identity lays down a directory tree, and a page that
+// could fire them in a loop would be a way to fill the operator's disk.
+let agentWriteInFlight = false;
+
+export async function handleAgentsPost(req, res) {
+  if (!sameOrigin(req)) return jsonError(res, 403, "That request didn't come from this page.");
+  if (agentWriteInFlight) return jsonError(res, 409, "A change is already going through.");
+
+  let body;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    return jsonError(res, 400, "Unreadable request.");
+  }
+  const action = body?.action;
+  if (!AGENT_ACTIONS.includes(action)) {
+    return jsonError(res, 400, "That isn't something this page can do to an agent.");
+  }
+
+  agentWriteInFlight = true;
+  try {
+    if (action === "create") {
+      // Hand the envelope's fields to the typed gate as they arrived, minus the
+      // action verb itself. createAgent refuses an unknown key BY NAME (its
+      // "nothing else is settable from this desk" gate); pre-filtering to an
+      // allowlist here would silently DROP such a key instead, which is the very
+      // thing the typed-envelope guarantee is supposed to prevent.
+      const fields = { ...body };
+      delete fields.action;
+      const agent = await createAgent({ root: AGENTS_ROOT, fields });
+      return sendJson(res, 200, {
+        ok: true,
+        agent,
+        note: "Created, and pending. It holds no credential, no network and no delegation — run its checks to bring it on duty.",
+      });
+    }
+    if (action === "activate") {
+      const result = await activateAgent({ root: AGENTS_ROOT, id: body?.id });
+      return sendJson(res, 200, { ok: true, ...result });
+    }
+    if (action === "update") {
+      // Same as create: the typed gate refuses an unknown key by name rather
+      // than this handler quietly discarding it. `id` is the envelope's, not a
+      // settable field.
+      const fields = { ...body };
+      delete fields.action;
+      delete fields.id;
+      const agent = await updateAgent({ root: AGENTS_ROOT, id: body?.id, fields });
+      return sendJson(res, 200, { ok: true, agent });
+    }
+    if (action === "lifecycle") {
+      const agent = await setLifecycle({
+        root: AGENTS_ROOT,
+        id: body?.id,
+        lifecycle: body?.lifecycle,
+      });
+      return sendJson(res, 200, { ok: true, agent });
+    }
+    const removed = await removeAgent({ root: AGENTS_ROOT, id: body?.id });
+    return sendJson(res, 200, { ok: true, ...removed });
+  } catch (err) {
+    // A refusal is a designed outcome and says exactly what it refused.
+    if (err instanceof AgentsRefused) return jsonError(res, 400, err.message);
+    console.error("[orderly-web] agent write failed:", err?.code || err?.message || "unknown");
+    return jsonError(res, 500, "That change couldn't be written. Nothing was altered.");
+  } finally {
+    agentWriteInFlight = false;
+  }
+}
+
+// §4.1 — the station's own copy of the conversation, so a named agent's thread
+// survives a restart, a cleared browser and a different machine on the tailnet.
+// The fixed desks are untouched by this: their threads stay in the browser,
+// which is what they have always done.
+async function handleAgentThread(req, res, url) {
+  const id = url.searchParams.get("agent");
+  let agent = null;
+  try {
+    agent = await findAgent({ root: AGENTS_ROOT, id });
+  } catch {
+    agent = null;
+  }
+  if (!agent) return jsonError(res, 404, "That isn't an agent on this station.");
+  try {
+    const turns = await readTranscript({ root: AGENTS_ROOT, id: agent.id });
+    sendJson(res, 200, {
+      state: "ok",
+      agent: agent.id,
+      name: agent.name,
+      lifecycle: agent.lifecycle,
+      turns,
+      readAt: new Date().toISOString(),
+    });
+  } catch {
+    sendJson(res, 200, { state: "error", agent: agent.id, turns: [], error: "The transcript couldn't be read." });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// seat engines
+// ---------------------------------------------------------------------------
+//
+// An engine is which endpoint and which model tag a seat thinks with, plus what
+// this station has reviewed that pairing as being able to do. The endpoint half
+// lives in the gateway's own config, where it always has; the reviewed half
+// lives in ORDERLY's engine file. These routes read both, probe a proposal
+// before it becomes active, and refuse anything past a seat's tier in words.
+//
+// Nothing here holds a credential value. A provider's key is named, never read,
+// except by the probe, which hands one to one fetch and returns none of it.
+
+const ENGINE_CACHE_MS = 5000;
+let engineCache = { at: 0, value: null };
+
+async function readGatewayConfig() {
+  return JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+}
+
+// Both halves of the picture, briefly cached because the chat path asks on
+// every message and neither file changes between two keystrokes.
+async function engineState({ fresh = false } = {}) {
+  if (!fresh && Date.now() - engineCache.at < ENGINE_CACHE_MS && engineCache.value) return engineCache.value;
+  let gatewayConfig = null;
+  let configError = null;
+  try {
+    gatewayConfig = await readGatewayConfig();
+  } catch (err) {
+    configError =
+      err?.code === "ENOENT"
+        ? "The gateway config is not readable from this desk's identity. On identity-split stations that is by design."
+        : "The gateway config couldn't be read as JSON.";
+  }
+  const file = await readEngineConfig({ path: ENGINES_CONFIG });
+  const value = { gatewayConfig, configError, ...file };
+  engineCache = { at: Date.now(), value };
+  return value;
+}
+
+// A gateway model reference is `<provider>/<agent>`; the seat is the tail.
+function seatIdFromRef(ref) {
+  return typeof ref === "string" ? ref.slice(ref.indexOf("/") + 1) : null;
+}
+
+function seatIdForDesk(desk) {
+  // A desk names a gateway agent; the seat is that agent. Read, never written:
+  // the desk table itself is not this feature's to change.
+  return seatIdFromRef(DESKS[desk]);
+}
+
+// §2.5.6 as one paragraph an operator can act on.
+function engineRefusalText(refusal) {
+  return [
+    refusal.message,
+    `You asked for ${refusal.requested}; this seat is ${refusal.activeTier}.`,
+    `Missing: ${refusal.missing}.`,
+    refusal.nextAction,
+  ].join(" ");
+}
+
+// §2.5.2/§2.5.3 — the engine and tier travel with the answer, on every channel
+// this server serves, so no surface has to remember to ask.
+function discloseEngine(res, gate) {
+  res.setHeader("X-Orderly-Tier", gate.tier ?? "unclassified");
+  if (gate.modelRef) res.setHeader("X-Orderly-Engine", gate.modelRef);
+}
+
+// `seatRef` is the gateway model reference the turn will actually be sent to —
+// a desk's seat normally, and the named-agent seat when a named identity is
+// answering. The classification has to follow the engine that really answers,
+// or the disclosure headers name a seat that never saw the question.
+async function gateSeat(seatRef, operationClass) {
+  const seatId = seatIdFromRef(seatRef);
+  const state = await engineState();
+  // No engine file, or no readable gateway config, means nothing was ever
+  // classified: the station keeps working exactly as it did.
+  if (!seatId || !state.gatewayConfig || !state.present) return { allowed: true, tier: null, modelRef: null };
+  let binding;
+  try {
+    binding = resolveSeatEngine({ gatewayConfig: state.gatewayConfig, overlay: state.overlay, seatId });
+  } catch {
+    return { allowed: true, tier: null, modelRef: null };
+  }
+  const decision = checkOperation({ binding, operationClass });
+  return { ...decision, modelRef: binding.modelRef, tier: decision.tier ?? binding.capabilityTier ?? null };
+}
+
+async function handleEnginesGet(_req, res) {
+  const state = await engineState({ fresh: true });
+  const harnesses = Object.values(HARNESSES).map((h) => ({ ref: h.ref, available: h.available, note: h.note }));
+  if (!state.gatewayConfig) {
+    return sendJson(res, 200, {
+      configured: state.present,
+      enginesFile: state.present ? ENGINES_CONFIG : null,
+      error: state.configError,
+      seats: [],
+      problems: [],
+      harnesses,
+    });
+  }
+  const list = Array.isArray(state.gatewayConfig?.agents?.list) ? state.gatewayConfig.agents.list : [];
+  const seats = [];
+  for (const agent of list) {
+    if (typeof agent?.id !== "string") continue;
+    try {
+      seats.push(describeEngine(resolveSeatEngine({ gatewayConfig: state.gatewayConfig, overlay: state.overlay, seatId: agent.id })));
+    } catch (err) {
+      seats.push({ seat: agent.id, error: err instanceof EngineRefused ? err.message : "couldn't be resolved." });
+    }
+  }
+  const validation = state.present
+    ? validateEngineConfig({ overlay: state.overlay, gatewayConfig: state.gatewayConfig })
+    : { ok: true, problems: [] };
+  sendJson(res, 200, {
+    configured: state.present,
+    enginesFile: state.present ? ENGINES_CONFIG : null,
+    error: state.error,
+    writable: SETTINGS_WRITABLE,
+    seats,
+    problems: validation.problems,
+    harnesses,
+  });
+}
+
+// A proposal that is not in any config yet is probeable, which is the whole
+// point of probing before activating: §4.2.8 says a failed probe never becomes
+// active, and the only way to keep that promise is to ask first.
+export function bindingFromProposal(proposal) {
+  if (!proposal || typeof proposal !== "object") return null;
+  const fields = [
+    "providerId",
+    "baseUrl",
+    "api",
+    "auth",
+    "apiKeyEnv",
+    "modelId",
+    "contextWindow",
+    "maxTokens",
+    "contextBudget",
+    "toolProtocol",
+    "capabilityTier",
+    "harnessRef",
+  ];
+  for (const key of Object.keys(proposal)) if (!fields.includes(key)) return null;
+  if (typeof proposal.baseUrl !== "string" || typeof proposal.modelId !== "string") return null;
+  return {
+    seatId: null,
+    providerId: proposal.providerId ?? null,
+    modelRef: `${proposal.providerId ?? "(proposed)"}/${proposal.modelId}`,
+    modelId: proposal.modelId,
+    baseUrl: proposal.baseUrl,
+    api: proposal.api ?? null,
+    auth: proposal.auth ?? "none",
+    apiKeyEnv: proposal.apiKeyEnv ?? null,
+    contextWindow: proposal.contextWindow ?? null,
+    maxTokens: proposal.maxTokens ?? null,
+    contextBudget: proposal.contextBudget ?? null,
+    toolProtocol: proposal.toolProtocol ?? null,
+    capabilityTier: proposal.capabilityTier ?? null,
+    harnessRef: proposal.harnessRef ?? null,
+  };
+}
+
+let engineProbeInFlight = false;
+
+export async function handleEnginesProbe(req, res) {
+  if (!sameOrigin(req)) return jsonError(res, 403, "That request didn't come from this page.");
+  if (engineProbeInFlight) return jsonError(res, 409, "A probe is already running.");
+  let body;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    return jsonError(res, 400, "Unreadable request.");
+  }
+
+  let binding = null;
+  if (typeof body?.seat === "string") {
+    const state = await engineState({ fresh: true });
+    if (!state.gatewayConfig) return jsonError(res, 503, state.configError ?? "The gateway config isn't readable here.");
+    try {
+      binding = resolveSeatEngine({ gatewayConfig: state.gatewayConfig, overlay: state.overlay, seatId: body.seat });
+    } catch (err) {
+      return jsonError(res, 400, err instanceof EngineRefused ? err.message : "That seat couldn't be resolved.");
+    }
+  } else {
+    binding = bindingFromProposal(body?.proposal);
+    if (!binding) return jsonError(res, 400, "Name a seat to probe, or a proposal with an address and a model tag.");
+  }
+
+  engineProbeInFlight = true;
+  try {
+    const result = await probeEngine({ binding });
+    sendJson(res, result.ok ? 200 : 400, {
+      ok: result.ok,
+      // A credentialed endpoint is verified by the gateway, not here (§4.2.2);
+      // surface that so the UI shows "deferred", never a pass it didn't earn.
+      deferred: result.deferred ?? false,
+      // The endpoint appears sanitized — scheme, host, port, path — so a
+      // probe report cannot carry a key that was pasted into a URL.
+      endpoint: describeEngine({ ...binding, fallbacks: [] }).endpoint,
+      model: binding.modelId,
+      failedStage: result.failedStage,
+      message: result.message,
+      stages: result.stages,
+      // §4.2.9 — what a failure did NOT do is part of the answer.
+      retained: result.ok ? null : "Nothing was changed. The seat is still running what it was.",
+    });
+  } finally {
+    engineProbeInFlight = false;
+  }
+}
+
+let engineWriteInFlight = false;
+
+export async function handleEnginesPost(req, res) {
+  if (!sameOrigin(req)) return jsonError(res, 403, "That request didn't come from this page.");
+  if (!SETTINGS_WRITABLE) return jsonError(res, 403, "This front door was started read-only.");
+  if (engineWriteInFlight) return jsonError(res, 409, "A change is already going through.");
+
+  let body;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    return jsonError(res, 400, "Unreadable request.");
+  }
+  for (const key of Object.keys(body ?? {})) {
+    if (!["provider", "models", "seats"].includes(key)) {
+      return jsonError(res, 400, `"${key}" is not part of an engine change.`);
+    }
+  }
+
+  engineWriteInFlight = true;
+  try {
+    const written = { provider: null, engines: null };
+
+    // The endpoint half first: a classification can only name a model that
+    // exists, so the provider has to land before the seat can point at it.
+    if (body.provider !== undefined) {
+      const definition = body.provider;
+      const probeTarget = bindingFromProposal({
+        providerId: definition?.providerId,
+        baseUrl: definition?.baseUrl,
+        api: definition?.api,
+        auth: definition?.auth,
+        ...(definition?.apiKeyEnv ? { apiKeyEnv: definition.apiKeyEnv } : {}),
+        modelId: definition?.models?.[0]?.id,
+        contextWindow: definition?.models?.[0]?.contextWindow,
+        maxTokens: definition?.models?.[0]?.maxTokens,
+      });
+      if (!probeTarget) return jsonError(res, 400, "That engine definition is missing an address or a model tag.");
+      const probe = await probeEngine({ binding: probeTarget });
+      if (!probe.ok) {
+        return jsonError(
+          res,
+          400,
+          `${probe.message} Nothing was added, and the station is unchanged.`,
+        );
+      }
+      written.provider = await writeProviderDefinition({ configPath: CONFIG_PATH, definition });
+      configCache = { at: 0, value: null };
+      engineCache = { at: 0, value: null };
+    }
+
+    if (body.models !== undefined || body.seats !== undefined) {
+      const state = await engineState({ fresh: true });
+      if (!state.gatewayConfig) return jsonError(res, 503, state.configError ?? "The gateway config isn't readable here.");
+      const result = await applyEngineEdits({
+        path: ENGINES_CONFIG,
+        overlay: state.overlay,
+        gatewayConfig: state.gatewayConfig,
+        edits: { ...(body.models !== undefined ? { models: body.models } : {}), ...(body.seats !== undefined ? { seats: body.seats } : {}) },
+      });
+      engineCache = { at: 0, value: null };
+      if (!result.ok) {
+        return sendJson(res, 400, {
+          error: result.problems.map((p) => `${p.where} ${p.message}`).join(" "),
+          stage: result.stage,
+          problems: result.problems,
+          retained: "Nothing was changed. Every seat is still running what it was.",
+        });
+      }
+      written.engines = { seats: Object.keys(result.overlay.seats), models: Object.keys(result.overlay.models) };
+    }
+
+    sendJson(res, 200, { ok: true, ...written, note: "Saved. The gateway is picking the change up." });
+  } catch (err) {
+    if (err instanceof Refused || err instanceof EngineRefused) return jsonError(res, 400, err.message);
+    console.error("[orderly-web] engine change failed:", err?.code || err?.message || "unknown");
+    return jsonError(res, 500, "The change couldn't be written. Nothing was altered.");
+  } finally {
+    engineWriteInFlight = false;
   }
 }
 
@@ -1198,7 +1837,8 @@ async function handleThemeMascot(req, res, urlPath) {
 }
 
 const server = createServer((req, res) => {
-  const urlPath = new URL(req.url, "http://localhost").pathname;
+  const url = new URL(req.url, "http://localhost");
+  const urlPath = url.pathname;
   if (urlPath.startsWith(`${BROKER_PREFIX}/`)) {
     const target = brokerRoute(req.method, urlPath);
     if (!target) {
@@ -1220,11 +1860,20 @@ const server = createServer((req, res) => {
   if (urlPath === "/api/settings" && req.method === "POST") {
     return void handleSettingsPost(req, res);
   }
+  if (urlPath === "/api/engines/probe" && req.method === "POST") {
+    return void handleEnginesProbe(req, res);
+  }
+  if (urlPath === "/api/engines" && req.method === "POST") {
+    return void handleEnginesPost(req, res);
+  }
   if (urlPath === "/api/agenda" && (req.method === "POST" || req.method === "GET")) {
     return void handleAgenda(req, res);
   }
   if (urlPath === "/api/queue" && req.method === "POST") {
     return void handleQueuePost(req, res);
+  }
+  if (urlPath === "/api/agents" && req.method === "POST") {
+    return void handleAgentsPost(req, res);
   }
   if (urlPath === "/api/dashboard/refresh" && req.method === "POST") {
     return void dashboardHandlers.post(req, res);
@@ -1238,8 +1887,11 @@ const server = createServer((req, res) => {
   if (urlPath === "/api/reminders") return void handleReminders(req, res);
   if (urlPath === "/api/queue") return void handleQueueGet(req, res);
   if (urlPath === "/api/settings") return void handleSettingsGet(req, res);
+  if (urlPath === "/api/engines") return void handleEnginesGet(req, res);
   if (urlPath === "/api/settings/health") return void handleSettingsHealth(req, res);
   if (urlPath === "/api/dashboard") return void dashboardHandlers.get(req, res);
+  if (urlPath === "/api/agents") return void handleAgentsGet(req, res);
+  if (urlPath === "/api/agents/thread") return void handleAgentThread(req, res, url);
   // a real path for the settings page, so it can be bookmarked and linked
   if (urlPath === "/settings" || urlPath === "/settings/") {
     return void handleStatic(req, res, "/settings.html");
@@ -1249,6 +1901,13 @@ const server = createServer((req, res) => {
   }
   if (urlPath === "/dashboard" || urlPath === "/dashboard/") {
     return void handleStatic(req, res, "/dashboard.html");
+  }
+  // Every /agents route serves the one management page. §1.2's per-agent
+  // `path` is a desk route the browser resolves for itself, so a handle in the
+  // address bar never reaches the filesystem: the server always answers with
+  // the same file and the page reads the handle out of location.
+  if (urlPath === "/agents" || urlPath === "/agents/" || urlPath.startsWith("/agents/")) {
+    return void handleStatic(req, res, "/agents.html");
   }
   if (urlPath === "/healthz") {
     securityHeaders(res);

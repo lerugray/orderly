@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Agents · ORDERLY</title>
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#161E2E" data-theme-color data-default-content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" data-theme-icon data-default-href="/favicon.svg" />
+    <link rel="stylesheet" href="/orderly.css" />
+  </head>
+  <body>
+    <a class="skip" href="#roster">Skip to the roster</a>
+
+    <header class="bar">
+      <div class="bar__brand">
+        <img class="bar__mark" src="/mark.svg" data-theme-mascot data-default-src="/mark.svg" alt="" width="26" height="26" />
+        <span class="wordmark">Orderly</span>
+      </div>
+      <nav class="nav" aria-label="Sections">
+        <a class="nav__link" href="/">Station</a>
+        <a class="nav__link" href="/dashboard">Dashboard</a>
+        <a class="nav__link is-here" href="/agents" aria-current="page">Agents</a>
+        <a class="nav__link" href="/orchestration">Orchestration</a>
+        <a class="nav__link" href="/settings">Settings</a>
+      </nav>
+      <p class="bar__where" id="bar-where">Private station</p>
+    </header>
+
+    <main class="page">
+      <section class="head">
+        <h1 class="head__title">Agents</h1>
+        <p class="head__sub">
+          Every identity this station answers as. The first three are the station's own and
+          cannot be edited from here. <strong>Anyone you name below is created with nothing</strong>
+          — no credential, no network, no delegation and no mailbox — because this page has no
+          field that could give it one, and the server refuses the write if a name or a purpose
+          so much as reads like a path or a key.
+        </p>
+        <p class="head__state" id="head-state" data-state="loading">Reading the roster…</p>
+      </section>
+
+      <!-- Creating one. Four things, and there is deliberately no fifth: a
+           name, what it is for, how it is addressed, and whether it remembers. -->
+      <section class="block" id="make">
+        <h2 class="label">Name a new one</h2>
+        <p class="block__intro" id="make-intro">
+          A named agent is a separate conversation and a separate transcript, kept on the station
+          so it survives a restart and a cleared browser. It is not a separate sandbox yet — read
+          the note at the foot of this page before you rely on one for anything private.
+        </p>
+        <form class="fields" id="make-form">
+          <label class="field field--stack">
+            <span class="field__text">
+              <span class="field__name">Name</span>
+              <span class="field__note">What you'll call it on the desk.</span>
+            </span>
+            <span class="field__control">
+              <input class="input" id="make-name" name="name" type="text" maxlength="60" autocomplete="off" placeholder="Reading log" required />
+            </span>
+          </label>
+
+          <label class="field field--stack">
+            <span class="field__text">
+              <span class="field__name">What it's for</span>
+              <span class="field__note">Your words. It is given this as standing orders it cannot edit.</span>
+            </span>
+            <span class="field__control">
+              <textarea class="input" id="make-desc" name="description" rows="3" maxlength="600" placeholder="Keeps track of what I'm reading and what I thought of it."></textarea>
+            </span>
+          </label>
+
+          <label class="field field--stack">
+            <span class="field__text">
+              <span class="field__name">Handle</span>
+              <span class="field__note">How it is addressed. Derived from the name unless you change it, and never reused once retired.</span>
+            </span>
+            <span class="field__control">
+              <input class="input input--mono" id="make-handle" name="handle" type="text" maxlength="30" autocomplete="off" placeholder="reading-log" />
+            </span>
+          </label>
+
+          <label class="field field--stack">
+            <span class="field__text">
+              <span class="field__name">Memory</span>
+              <span class="field__note">
+                Persistent keeps its own notes and its own transcript. Memoryless keeps neither, and
+                cannot be changed to persistent later — you would create a new identity instead.
+              </span>
+            </span>
+            <span class="field__control">
+              <select class="select" id="make-memory" name="memoryPolicy">
+                <option value="persistent" selected>Persistent</option>
+                <option value="memoryless">Memoryless</option>
+              </select>
+            </span>
+          </label>
+
+          <div class="makebar">
+            <p class="makebar__note" id="make-note">
+              It starts pending. Nothing is on duty until its checks pass.
+            </p>
+            <button class="cta cta--solid" type="submit" id="make-go">Name it</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="block" id="roster">
+        <div class="day__head">
+          <h2 class="label">The roster</h2>
+          <p class="day__when" id="roster-when">reading</p>
+        </div>
+        <ul class="roster" id="roster-list"></ul>
+      </section>
+
+      <section class="block">
+        <h2 class="label">What a named agent has, and what it does not</h2>
+        <div class="note note--hard">
+          <p>
+            <strong>It holds no credential, and this page cannot give it one.</strong> Mail, the
+            calendar and web research stay with the identities that already own them. A named agent
+            cannot ask them to work on its behalf: delegation is off and there is no switch here
+            that turns it on.
+          </p>
+        </div>
+        <div class="note note--warn">
+          <p>
+            <strong>It does not have a sealed container of its own yet.</strong> Its conversation and
+            its transcript are genuinely separate, and it is told plainly that it may not delegate —
+            but that last part is an instruction, not a wall, because the seat answering it is still
+            the coordinator's. Until each identity gets its own sandbox and passes the container
+            checks, treat a named agent as a separate <em>conversation</em>, not a separate
+            <em>confinement</em>. The checks that have run are listed against each one below; the
+            ones still owed are listed beside them.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>ORDERLY runs on hardware you own, on subscriptions you already pay for.</p>
+    </footer>
+
+    <script src="/themes.js" type="module"></script>
+    <script src="/agents.js" type="module"></script>
+  </body>
+</html>
