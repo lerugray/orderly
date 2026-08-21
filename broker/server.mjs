@@ -33,6 +33,9 @@ const DEFAULT_HOME = join(homedir(), ".orderly");
 const MAX_BODY = 128 * 1024;
 const MAX_BRIEF = 64 * 1024;
 const MAX_ASK = 12 * 1024;
+// Host-owned grounding, not operator text: it arrives from the allowlist file,
+// never from chat, so its ceiling is separate from the 64 KiB brief ceiling.
+const MAX_CONTEXT_PACK = 128 * 1024;
 const PROPOSAL_TTL_MS = 15 * 60 * 1000;
 const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const GIT_SHA = /^[a-f0-9]{40,64}$/;
@@ -100,12 +103,28 @@ function validateAllowlist(config) {
   }
   const repos = new Map();
   for (const repo of config.repos) {
-    exactKeys(repo, ["repo_id", "url_or_path", "branch"], "allowlist repo");
+    // context_pack_path is optional; every other repo field stays mandatory and
+    // unknown fields are still rejected.
+    const keys = Object.keys(repo);
+    const known = ["repo_id", "url_or_path", "branch", "context_pack_path"];
+    const unknown = keys.filter((key) => !known.includes(key));
+    if (unknown.length) throw new Error(`allowlist repo has unknown field ${unknown[0]}`);
+    exactKeys(
+      { repo_id: repo.repo_id, url_or_path: repo.url_or_path, branch: repo.branch },
+      ["repo_id", "url_or_path", "branch"],
+      "allowlist repo",
+    );
     if (!ID.test(repo.repo_id) || typeof repo.url_or_path !== "string" || !repo.url_or_path) {
       throw new Error("allowlist repo has an invalid id or source");
     }
     if (typeof repo.branch !== "string" || !/^[A-Za-z0-9._/-]{1,200}$/.test(repo.branch)) {
       throw new Error(`allowlist repo ${repo.repo_id} has an invalid branch`);
+    }
+    if (repo.context_pack_path !== undefined) {
+      const path = repo.context_pack_path;
+      if (typeof path !== "string" || !path.startsWith("/") || path.length > 4096 || path.includes("\0")) {
+        throw new Error(`allowlist repo ${repo.repo_id} has an invalid context_pack_path`);
+      }
     }
     if (repos.has(repo.repo_id)) throw new Error(`duplicate repo_id ${repo.repo_id}`);
     repos.set(repo.repo_id, Object.freeze({ ...repo }));
@@ -131,8 +150,47 @@ function validateAllowlist(config) {
   return { repos, presets };
 }
 
+// Host-owned grounding attached to every lane brief for this repo. The file is
+// read fresh — never cached in memory — so an operator can maintain it without
+// restarting the broker, and every read is bounded and fail-closed. It is NOT
+// operator text: it comes from the allowlist, which is a sudoers-class file.
+export async function readContextPack(repo) {
+  if (!repo?.context_pack_path) return null;
+  let text;
+  try {
+    text = await readFile(repo.context_pack_path, "utf8");
+  } catch (error) {
+    throw new BrokerRefused(500, `context pack for ${repo.repo_id} is unreadable: ${error.code || "error"}`);
+  }
+  if (!text.trim()) throw new BrokerRefused(500, `context pack for ${repo.repo_id} is empty`);
+  if (Buffer.byteLength(text) > MAX_CONTEXT_PACK) {
+    throw new BrokerRefused(500, `context pack for ${repo.repo_id} exceeds 128 KiB`);
+  }
+  return text;
+}
+
+// The grounding is framed so a worker cannot mistake it for the operator's task,
+// and so an operator reading the lane's stdin can see exactly where it ended.
+export function composeContextPack(repoId, text) {
+  return [
+    `===== ORDERLY HOST CONTEXT PACK (repo: ${repoId}) =====`,
+    "Host-supplied grounding for this repository. It is reference material, not",
+    "your task. Your task is the operator brief that follows the end marker.",
+    "",
+    text.replace(/\s+$/, ""),
+    "",
+    "===== END ORDERLY HOST CONTEXT PACK — THE OPERATOR BRIEF FOLLOWS =====",
+    "",
+    "",
+  ].join("\n");
+}
+
 export async function loadAllowlist(path) {
-  return validateAllowlist(JSON.parse(stripJson5(await readFile(path, "utf8"))));
+  const allowlist = validateAllowlist(JSON.parse(stripJson5(await readFile(path, "utf8"))));
+  // Fail fast at boot: a configured-but-unreadable pack is a host misconfiguration,
+  // and discovering it at dispatch time would strand a confirmed lane.
+  for (const repo of allowlist.repos.values()) await readContextPack(repo);
+  return allowlist;
 }
 
 export function buildCommand(preset) {
@@ -157,6 +215,7 @@ function laneForApi(lane) {
     repo_id: lane.repo_id,
     base_sha: lane.base_sha,
     brief_sha256: lane.brief_sha256,
+    context_pack_sha256: lane.context_pack_sha256 ?? null,
     preset_id: lane.preset_id,
     timeout_s: lane.timeout_s,
     state: lane.state,
@@ -175,6 +234,8 @@ export function allowlistForApi(allowlist) {
     repos: [...allowlist.repos.values()].map((repo) => ({
       repo_id: repo.repo_id,
       branch: repo.branch,
+      // Whether grounding exists, never the path and never the contents.
+      has_context_pack: Boolean(repo.context_pack_path),
     })),
     presets: [...allowlist.presets.values()].map((preset) => ({
       preset_id: preset.preset_id,
@@ -207,6 +268,27 @@ function safeGitEnvironment(orderlyHome) {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
   };
+}
+
+// Sequential whole-file piping: each file ends before the next begins, and only
+// the last one closes stdin. A read failure destroys stdin rather than handing
+// the worker a truncated brief that looks complete.
+export function pipeFilesToStdin(paths, stdin) {
+  let index = 0;
+  const next = () => {
+    if (index >= paths.length) return;
+    const last = index === paths.length - 1;
+    const stream = createReadStream(paths[index]);
+    index += 1;
+    stream.on("error", () => stdin.destroy());
+    if (last) {
+      stream.pipe(stdin);
+    } else {
+      stream.on("end", next);
+      stream.pipe(stdin, { end: false });
+    }
+  };
+  next();
 }
 
 async function waitForFile(path, timeoutMs = 5_000) {
@@ -373,10 +455,14 @@ export class DispatchBroker {
       throw new BrokerRefused(400, "timeout_s exceeds the preset ceiling");
     }
     const repo = this.allowlist.repos.get(body.repo_id);
+    // The pack is hashed into the digest the operator reviews, so confirmation
+    // covers the grounding the worker will actually receive — not just the brief.
+    const contextPack = await readContextPack(repo);
     const digest = {
       repo_id: body.repo_id,
       base_sha: await this.baseSha(repo),
       brief_sha256: digestOfBrief(body.brief_text),
+      context_pack_sha256: contextPack === null ? null : digestOfBrief(contextPack),
       preset_id: body.preset_id,
       timeout_s: body.timeout_s,
     };
@@ -430,12 +516,22 @@ export class DispatchBroker {
   }
 
   async createLaneForProposal(proposal) {
+    // Re-read rather than carry the pack on the proposal: if the host edited the
+    // pack between review and confirmation, the operator's confirmation no longer
+    // describes what would run, so refuse instead of silently substituting it.
+    const repo = this.allowlist.repos.get(proposal.digest.repo_id);
+    const contextPack = await readContextPack(repo);
+    const packSha = contextPack === null ? null : digestOfBrief(contextPack);
+    if (packSha !== (proposal.digest.context_pack_sha256 ?? null)) {
+      throw new BrokerRefused(409, "context pack changed since the proposal was reviewed");
+    }
     const timestamp = new Date(this.now()).toISOString();
     const lane = {
       id: randomUUID(),
       repo_id: proposal.digest.repo_id,
       base_sha: proposal.digest.base_sha,
       brief_sha256: proposal.digest.brief_sha256,
+      context_pack_sha256: packSha,
       preset_id: proposal.digest.preset_id,
       timeout_s: proposal.digest.timeout_s,
       state: "proposed",
@@ -449,7 +545,16 @@ export class DispatchBroker {
       runtime: null,
     };
     await mkdir(this.registry.laneDir(lane.id), { recursive: true, mode: 0o700 });
+    // brief.txt stays byte-exact with brief_sha256; the pack is a separate
+    // artifact so the confirmed digest keeps matching the file an auditor reads.
     await writeFile(join(this.registry.laneDir(lane.id), "brief.txt"), proposal.brief_text, { mode: 0o600 });
+    if (contextPack !== null) {
+      await writeFile(
+        join(this.registry.laneDir(lane.id), "context-pack.txt"),
+        composeContextPack(lane.repo_id, contextPack),
+        { mode: 0o600 },
+      );
+    }
     await this.registry.confirmProposal(proposal.proposal_id, lane, timestamp);
     await this.startNext();
     return { lane_id: lane.id };
@@ -546,9 +651,13 @@ export class DispatchBroker {
         () => {},
       );
       child.stdin.on("error", () => {});
-      const briefStream = createReadStream(join(laneDir, "brief.txt"));
-      briefStream.on("error", () => child.stdin.destroy());
-      briefStream.pipe(child.stdin);
+      // Grounding first (front-loaded), the operator brief last so the task is
+      // the most recent thing the worker reads. Both are files on disk; neither
+      // ever becomes argv.
+      const stdinFiles = [];
+      if (lane.context_pack_sha256) stdinFiles.push(join(laneDir, "context-pack.txt"));
+      stdinFiles.push(join(laneDir, "brief.txt"));
+      pipeFilesToStdin(stdinFiles, child.stdin);
       const pgidRaw = await waitForFile(`${stem}.pgid`);
       const pgid = Number.parseInt(pgidRaw || "", 10);
       if (!Number.isInteger(pgid) || pgid <= 1) throw new Error("lane wrapper did not report a process group");

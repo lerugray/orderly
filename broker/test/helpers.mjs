@@ -91,6 +91,18 @@ export function fixedPresets() {
       timeout_max_s: 30,
     },
     {
+      // Writes whatever reached the worker's stdin, so a test can assert the
+      // exact bytes the fixed command was fed.
+      preset_id: "stdin-capture",
+      cmd_template: [
+        process.execPath,
+        "-e",
+        "const f=require('fs');let b='';process.stdin.setEncoding('utf8');process.stdin.on('data',(c)=>{b+=c});process.stdin.on('end',()=>f.writeFileSync('stdin-seen.txt',b))",
+      ],
+      sandbox: "workspace-write",
+      timeout_max_s: 10,
+    },
+    {
       preset_id: "env-check",
       cmd_template: [
         process.execPath,
@@ -103,12 +115,26 @@ export function fixedPresets() {
   ];
 }
 
-export async function startBroker({ fixture, presets = fixedPresets(), now, proposalTtlMs, seatInvoker } = {}) {
+export async function startBroker({
+  fixture,
+  presets = fixedPresets(),
+  now,
+  proposalTtlMs,
+  seatInvoker,
+  contextPackPath,
+} = {}) {
   const allowlistPath = join(fixture.root, "allowlist.json5");
   await writeFile(
     allowlistPath,
     JSON.stringify({
-      repos: [{ repo_id: "fixture-sandbox", url_or_path: fixture.repo, branch: "main" }],
+      repos: [
+        {
+          repo_id: "fixture-sandbox",
+          url_or_path: fixture.repo,
+          branch: "main",
+          ...(contextPackPath ? { context_pack_path: contextPackPath } : {}),
+        },
+      ],
       presets,
     }),
   );
@@ -190,4 +216,8 @@ export async function waitForLane(broker, id, state = "terminal", timeoutMs = 8_
 
 export async function briefFor(broker, id) {
   return readFile(join(broker.registry.laneDir(id), "brief.txt"), "utf8");
+}
+
+export async function contextPackFor(broker, id) {
+  return readFile(join(broker.registry.laneDir(id), "context-pack.txt"), "utf8");
 }

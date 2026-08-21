@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "subscriptions": [
+    {
+      "id": "codex-primary",
+      "label": "Codex",
+      "provider": "codex",
+      "source": "codexbar-loopback",
+      "probe_source": "oauth",
+      "seat_refs": ["orchestrator", "preset:codex-default"],
+      "headline_window": "session"
+    },
+    {
+      "id": "claude-primary",
+      "label": "Claude",
+      "provider": "claude",
+      "source": "codexbar-loopback",
+      "probe_source": "oauth",
+      "seat_refs": ["preset:claude-default"],
+      "headline_window": "session"
+    },
+    {
+      "id": "openrouter-primary",
+      "label": "OpenRouter",
+      "provider": "openrouter",
+      "source": "codexbar-loopback",
+      "probe_source": "api",
+      "seat_refs": ["preset:openrouter-default"],
+      "headline_window": "session"
+    },
+    {
+      "id": "zai-primary",
+      "label": "Z.ai",
+      "provider": "zai",
+      "source": "codexbar-loopback",
+      "probe_source": "api",
+      "seat_refs": ["preset:zai-default"],
+      "headline_window": "session"
+    },
+    {
+      "id": "moonshot-primary",
+      "label": "Moonshot",
+      "provider": "moonshot",
+      "source": "codexbar-loopback",
+      "probe_source": "api",
+      "seat_refs": ["preset:moonshot-default"],
+      "headline_window": "session"
+    },
+    {
+      "id": "deepseek-primary",
+      "label": "DeepSeek",
+      "provider": "deepseek",
+      "source": "codexbar-loopback",
+      "probe_source": "api",
+      "seat_refs": ["preset:deepseek-default"],
+      "headline_window": "session"
+    },
+    {
+      "id": "ollama-primary",
+      "label": "Ollama Cloud",
+      "provider": "ollama",
+      "source": "codexbar-loopback",
+      "probe_source": "api",
+      "seat_refs": ["preset:ollama-default"],
+      "headline_window": "session"
+    },
+    {
+      "id": "copilot-primary",
+      "label": "Copilot",
+      "provider": "copilot",
+      "source": "codexbar-loopback",
+      "probe_source": "api",
+      "seat_refs": ["preset:copilot-default"],
+      "headline_window": "session"
+    }
+  ]
+}

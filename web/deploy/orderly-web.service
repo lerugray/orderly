@@ -1,0 +1,59 @@
+[Unit]
+Description=ORDERLY front door (loopback static, status and chat proxy)
+After=network.target
+Wants=orderly-gateway.service
+
+[Service]
+Type=exec
+# The front door is deliberately NOT the gateway's identity and NOT a member of
+# `docker`; see INSTALL-PLAN.md Phase 1. Everything this unit needs that the
+# account cannot reach on its own arrives through a typed socket or through
+# systemd, never through a group that could reach the daemon.
+User=orderly-web
+Group=orderly-web
+Environment=ORDERLY_WEB_PORT=18790
+Environment=ORDERLY_GATEWAY_PORT=18789
+Environment=ORDERLY_WEB_NODE=/usr/bin/node
+Environment=ORDERLY_WEB_DIR=/var/lib/orderly-web
+# Rewritten by install.sh to this host's OpenClaw. Read-only, and only its
+# docs/providers filenames — used to enumerate supported providers honestly
+# rather than shipping a list that goes stale.
+Environment=ORDERLY_OPENCLAW_DOCS=
+# Colon-separated. Read for variable NAMES only, so the settings page can say
+# whether a provider's credential is present and which file holds it. Rewritten
+# by install.sh to the files that actually exist and that this identity can
+# read.
+Environment=ORDERLY_ENV_FILES=
+# The orchestration broker. This process forwards a fixed verb and the
+# operator's per-request token; it owns no lane state and no dispatch authority.
+Environment=ORDERLY_BROKER_SOCKET=/var/lib/orderly-broker/.orderly/broker.sock
+# The calendar write. Formerly a script this unit ran itself, which is why the
+# old single-identity unit needed Docker. It is now a typed helper on the other
+# side of a mode-0660 socket: two verbs, an account WORD, bounded fields. This
+# unit holds no calendar credential, no store path, and not even the two
+# mailbox ADDRESSES — the helper owns that mapping, so a compromise here does
+# not disclose them.
+Environment=ORDERLY_CALENDAR_SOCKET=/var/lib/orderly-calendar/calendar.sock
+
+# The gateway bearer.
+#
+# The wrapper below still lifts exactly one variable out of ~/.openclaw/.env,
+# which is right when the front door and the gateway share an identity. They no
+# longer do, and that file is 0600 to the gateway's account: making it readable
+# here would hand this identity the Telegram bot token in the same breath, so
+# it is deliberately not done.
+#
+# Instead root provisions the ONE variable into a root-owned 0600 file and
+# systemd — which reads it as root, before dropping privileges — puts it in
+# this process's environment. The service identity is granted no read of the
+# file at all, which is strictly less than a group-readable copy would be. The
+# leading `-` keeps the honest degradation: with no file the unit still starts,
+# /api/chat answers 503 with an explanation, and the page disables its composer.
+EnvironmentFile=-/etc/orderly/orderly-web.env
+
+ExecStart=/var/lib/orderly-web/start-web.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

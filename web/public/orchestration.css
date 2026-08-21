@@ -259,7 +259,7 @@
 }
 
 .lane__head {
-  background: rgba(51, 69, 107, 0.18);
+  background: rgba(var(--line-rgb), 0.18);
   border-bottom: 1px solid var(--line);
 }
 

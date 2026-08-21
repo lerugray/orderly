@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Dashboard · ORDERLY</title>
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#161E2E" data-theme-color data-default-content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" data-theme-icon data-default-href="/favicon.svg" />
+    <link rel="stylesheet" href="/orderly.css" />
+    <link rel="stylesheet" href="/dashboard.css" />
+  </head>
+  <body>
+    <a class="skip" href="#dashboard">Skip to dashboard</a>
+
+    <header class="bar">
+      <div class="bar__brand">
+        <img class="bar__mark" src="/mark.svg" data-theme-mascot data-default-src="/mark.svg" alt="" width="26" height="26" />
+        <span class="wordmark">Orderly</span>
+      </div>
+      <nav class="nav" aria-label="Sections">
+        <a class="nav__link" href="/">Station</a>
+        <a class="nav__link is-here" href="/dashboard" aria-current="page">Dashboard</a>
+        <a class="nav__link" href="/orchestration">Orchestration</a>
+        <a class="nav__link" href="/settings">Settings</a>
+      </nav>
+      <p class="bar__where">Life console</p>
+    </header>
+
+    <main class="dashboard" id="dashboard">
+      <section class="dashboard__head">
+        <div>
+          <p class="eyebrow">Current snapshot · advisory only</p>
+          <h1>Dashboard</h1>
+          <p class="dashboard__intro">
+            The station, its coding lane, waiting decisions, and explicitly enabled subscription
+            meters. This page observes; it never changes a dispatch.
+          </p>
+        </div>
+        <div class="dashboard__refresh">
+          <button class="ghost" id="refresh-quota" type="button">Refresh quota</button>
+          <p id="snapshot-stamp" role="status">Reading the station…</p>
+        </div>
+      </section>
+
+      <section class="dashboard-section" aria-labelledby="attention-title">
+        <div class="section-heading">
+          <h2 class="label" id="attention-title">Attention</h2>
+          <a href="/orchestration">Open lane desk</a>
+        </div>
+        <div class="attention" id="attention"></div>
+      </section>
+
+      <section class="dashboard-section" aria-labelledby="station-title">
+        <div class="section-heading">
+          <h2 class="label" id="station-title">Station</h2>
+          <a href="/">Open station</a>
+        </div>
+        <div class="summary-grid" id="station-summary"></div>
+      </section>
+
+      <section class="dashboard-section" aria-labelledby="subscriptions-title">
+        <div class="section-heading">
+          <h2 class="label" id="subscriptions-title">Subscriptions</h2>
+          <p>Provider snapshots · never lane attribution</p>
+        </div>
+        <div class="subscriptions" id="subscriptions"></div>
+      </section>
+
+      <section class="dashboard-section" aria-labelledby="lanes-title">
+        <div class="section-heading">
+          <h2 class="label" id="lanes-title">Lane health</h2>
+          <a href="/orchestration">Inspect broker records</a>
+        </div>
+        <div class="summary-grid" id="lane-summary"></div>
+        <div class="lane-focus" id="lane-focus"></div>
+      </section>
+
+      <section class="dashboard-section split" aria-label="Activity and orders">
+        <div>
+          <div class="section-heading">
+            <h2 class="label">Dispatch activity</h2>
+            <p>Broker timestamps only</p>
+          </div>
+          <div class="timeline" id="timeline"></div>
+        </div>
+        <div>
+          <div class="section-heading">
+            <h2 class="label">Order queues</h2>
+            <a href="/#queue">Open approvals</a>
+          </div>
+          <div class="orders" id="orders"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>Terminal means ready for operator inspection. Quota is a current advisory snapshot.</p>
+    </footer>
+
+    <script src="/themes.js" type="module"></script>
+    <script src="/dashboard.js" type="module"></script>
+  </body>
+</html>

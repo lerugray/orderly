@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Orchestration · ORDERLY</title>
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#161E2E" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#161E2E" data-theme-color data-default-content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" data-theme-icon data-default-href="/favicon.svg" />
     <link rel="stylesheet" href="/orderly.css" />
     <link rel="stylesheet" href="/orchestration.css" />
   </head>
@@ -15,11 +15,12 @@
 
     <header class="bar">
       <div class="bar__brand">
-        <img class="bar__mark" src="/mark.svg" alt="" width="26" height="26" />
+        <img class="bar__mark" src="/mark.svg" data-theme-mascot data-default-src="/mark.svg" alt="" width="26" height="26" />
         <span class="wordmark">Orderly</span>
       </div>
       <nav class="nav" aria-label="Sections">
         <a class="nav__link" href="/">Station</a>
+        <a class="nav__link" href="/dashboard">Dashboard</a>
         <a class="nav__link is-here" href="/orchestration" aria-current="page">Orchestration</a>
         <a class="nav__link" href="/settings">Settings</a>
       </nav>
@@ -133,6 +134,7 @@
       <p>Workers cannot commit, merge, push, publish, or declare their own work accepted.</p>
     </footer>
 
+    <script src="/themes.js" type="module"></script>
     <script src="/orchestration.js" type="module"></script>
   </body>
 </html>

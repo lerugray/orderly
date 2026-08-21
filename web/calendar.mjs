@@ -1,4 +1,4 @@
-// ORDERLY — the front door's calendar-write executor.
+// ORDERLY — the front door's calendar-write CLIENT.
 //
 // This is the ONLY file in the web surface that can change anything outside
 // this station, and it can change exactly two things: it can create a calendar
@@ -8,13 +8,22 @@
 // How it works, and why it is shaped like this:
 //
 //   * The credential lives in a gog store on the host that NO AGENT CONTAINER
-//     MOUNTS. This process does not read it either. It runs a host script
-//     (config/orderly-calendar.sh) which starts a short-lived container with
-//     that store bound in, and the container dies with the command.
-//   * The invocation is execFile, never a shell. Every operator- and
-//     model-supplied value crosses as a separate argv entry inside one JSON
-//     argument, and the script validates each field by shape before it becomes
-//     a flag. Nothing here is interpolated into a command line.
+//     MOUNTS, and that THIS PROCESS CANNOT SEE EITHER. Writing needs Docker,
+//     because `gog` exists only inside the sandbox image — and per
+//     INSTALL-PLAN.md Phase 1 the front door is deliberately not in `docker`
+//     and never will be, that group being host-root-equivalent.
+//   * So the write moved behind a separately reviewed typed helper
+//     (`calendar/server.mjs`, `orderly-calendar.service`), which runs as the
+//     host identity that already owns the store and already has Docker. This
+//     process reaches it over a mode-0660 UNIX socket it can open only because
+//     it is a member of the helper's socket group — the same shape as the
+//     orchestration broker, and the same reason: the front door forwards a
+//     typed verb, it does not hold the authority.
+//   * Nothing here becomes a path, a flag, an argv element or an environment
+//     entry on the other side. This process sends one of two verbs, an account
+//     WORD, and bounded scalar fields as JSON. It does not even know the two
+//     mailbox addresses — the helper owns that mapping, so a compromise of the
+//     front door does not leak them.
 //   * A write happens ONLY on an approve decision the operator made on the
 //     front door. There is no endpoint that writes a calendar directly, and
 //     there is no path from an agent to this code: agents are in containers,
@@ -24,17 +33,19 @@
 // the UI has to say which: on a DRAFT it means read-and-kept and nothing
 // happens; on an EVENT PROPOSAL it means do it, now, for real.
 
-import { execFile } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 
-const SCRIPT =
-  process.env.ORDERLY_CALENDAR_SCRIPT ||
-  join(process.env.HOME || "", ".orderly-web", "orderly-calendar.sh");
+const SOCKET =
+  process.env.ORDERLY_CALENDAR_SOCKET ||
+  join(process.env.HOME || "", ".orderly-calendar", "calendar.sock");
 
-// A container start plus a Google round trip. Generous, but bounded: a hung
-// write must not hold a browser request open forever.
-const TIMEOUT_MS = 60_000;
-const MAX_OUTPUT = 256 * 1024;
+// The helper caps its own work at 60s. This waits a little longer so a helper
+// that refuses on time gets to say why, rather than being cut off and reported
+// as unreachable.
+const TIMEOUT_MS = 75_000;
+const STATUS_TIMEOUT_MS = 2_000;
+const STATUS_TTL_MS = 30_000;
 
 export class CalendarRefused extends Error {}
 
@@ -42,64 +53,90 @@ const ACCOUNTS = new Set(["personal", "work"]);
 const TIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})$/;
 const EVENT_ID = /^[A-Za-z0-9_@.-]{1,256}$/;
 
-// The two mailbox WORDS the operator and the agents use are not addresses, and
-// `-a` takes an address — the exact mistake POLICY-GUARD records for the mail
-// desk. The mapping lives here, in the environment, and a word with no address
-// behind it is a refusal rather than a guess.
-function addressFor(account) {
-  if (!ACCOUNTS.has(account)) throw new CalendarRefused("That isn't one of the two accounts.");
-  const value =
-    account === "work" ? process.env.ORDERLY_WORK_EMAIL : process.env.ORDERLY_GMAIL;
-  if (!value) {
-    throw new CalendarRefused(
-      `This front door doesn't know the address of your ${account} account, so it won't guess one. Set ORDERLY_${account === "work" ? "WORK_EMAIL" : "GMAIL"} on orderly-web.service.`,
+// The shape and the instant are different questions: the regex alone accepts
+// month 13. Checked here so the operator gets a sentence, and again on the
+// helper so the socket is safe without this file.
+function isRealTime(value) {
+  return TIME.test(value) && Number.isFinite(Date.parse(value.replace(" ", "T")));
+}
+
+function call(path, method, body, { socketPath = SOCKET, requestImpl = httpRequest, timeoutMs = TIMEOUT_MS } = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const payload = body === undefined ? null : JSON.stringify(body);
+    let req;
+    try {
+      req = requestImpl({
+        socketPath,
+        path,
+        method,
+        headers: {
+          Accept: "application/json",
+          ...(payload
+            ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+            : {}),
+        },
+      });
+    } catch {
+      reject(new CalendarRefused("The calendar helper isn't reachable from this station."));
+      return;
+    }
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("calendar-timeout")));
+    req.once("error", () =>
+      reject(new CalendarRefused("The calendar helper isn't reachable from this station.")),
     );
+    req.once("response", (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        let obj = null;
+        try {
+          obj = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        } catch {
+          obj = null;
+        }
+        if ((res.statusCode || 500) >= 400) {
+          // The helper's refusals are written for a person and are safe to
+          // relay. Anything else is reported by shape; the browser never
+          // receives a stack, an argv or an address.
+          reject(new CalendarRefused(obj?.error || "The station couldn't complete that change."));
+          return;
+        }
+        resolvePromise(obj || {});
+      });
+      res.on("error", () => reject(new CalendarRefused("The station couldn't complete that change.")));
+    });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// Asked of the helper rather than assumed, and cached briefly because the queue
+// endpoint is polled. A station whose calendar accounts are not wired — or
+// whose helper is not running — shows the proposal and says plainly that
+// approving it would fail, instead of offering a button that throws.
+let statusCache = { at: 0, value: false };
+
+export async function calendarConfigured(options = {}) {
+  const now = Date.now();
+  if (!options.fresh && now - statusCache.at < STATUS_TTL_MS) return statusCache.value;
+  let value = false;
+  try {
+    const res = await call("/v1/calendar/status", "GET", undefined, {
+      timeoutMs: STATUS_TIMEOUT_MS,
+      ...options,
+    });
+    value = Boolean(res?.available);
+  } catch {
+    value = false;
   }
+  statusCache = { at: now, value };
   return value;
 }
 
-export function calendarConfigured() {
-  return Boolean(process.env.ORDERLY_GMAIL || process.env.ORDERLY_WORK_EMAIL);
-}
-
-function run(args) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "bash",
-      [SCRIPT, ...args],
-      { timeout: TIMEOUT_MS, maxBuffer: MAX_OUTPUT },
-      (err, stdout, stderr) => {
-        if (err) {
-          // The script's own refusals are written for a person and are safe to
-          // relay; anything else is reported by shape. Either way the browser
-          // never receives a stack or an argv.
-          const lines = String(stderr || "")
-            .split("\n")
-            .map((l) => l.trim())
-            .filter(Boolean);
-          // The script's own refusals are written for a person. Failing that,
-          // gog's first line is usually the actual reason ("No auth for
-          // calendar ...", a 403, a bad time) and is far more use to the
-          // operator than a shrug — but only the FIRST line, and only if it
-          // reads like a sentence rather than a dump.
-          const own = lines.find((l) => l.startsWith("FATAL:") || l.startsWith("REFUSED:"));
-          const first = lines[0];
-          const said = own
-            ? own.replace(/^(FATAL|REFUSED):\s*/, "")
-            : first && first.length <= 160 && !first.includes("gog ")
-              ? first
-              : null;
-          reject(
-            new CalendarRefused(
-              said ? `The station said: ${said}` : "The station couldn't complete that change.",
-            ),
-          );
-          return;
-        }
-        resolve(String(stdout));
-      },
-    );
-  });
+// Test seam: the cache is deliberately process-lifetime, so a suite that
+// exercises two different helpers has to be able to clear it.
+export function resetCalendarStatusCache() {
+  statusCache = { at: 0, value: false };
 }
 
 // gog --json prints the event object. What matters afterwards is the id (so an
@@ -127,8 +164,9 @@ function readResult(stdout) {
 }
 
 // The proposal as it sits on the queue, turned into the change to make. Every
-// field is re-checked here even though the script checks them again: this side
-// can give the operator a sentence, the script can only refuse.
+// field is re-checked here even though the helper and the script check them
+// again: this side can give the operator a sentence, the others can only
+// refuse. Each layer is written to be sufficient on its own.
 function payloadOf(item) {
   const out = {};
   if (item.summary) out.summary = String(item.summary).slice(0, 300);
@@ -140,7 +178,7 @@ function payloadOf(item) {
     out.attendees = item.attendees.slice(0, 25).join(",");
   }
   for (const key of ["from", "to"]) {
-    if (out[key] && !TIME.test(out[key])) {
+    if (out[key] && !isRealTime(out[key])) {
       throw new CalendarRefused(
         `The ${key === "from" ? "start" : "end"} time on this proposal isn't a full date and time with a timezone, so it won't be sent as one.`,
       );
@@ -149,16 +187,26 @@ function payloadOf(item) {
   return out;
 }
 
-export async function applyProposal(item) {
-  const account = addressFor(item.account);
+function accountOf(item) {
+  if (!ACCOUNTS.has(item?.account)) throw new CalendarRefused("That isn't one of the two accounts.");
+  return item.account;
+}
+
+export async function applyProposal(item, options = {}) {
+  const account = accountOf(item);
   const payload = payloadOf(item);
 
   if (item.action === "create") {
     if (!payload.summary || !payload.from || !payload.to) {
       throw new CalendarRefused("A new event needs a title, a start and an end. This proposal is missing one.");
     }
-    const out = await run(["create", account, JSON.stringify(payload)]);
-    return { ...readResult(out), action: "create", account: item.account, at: new Date().toISOString() };
+    const res = await call("/v1/calendar/create", "POST", { account, payload }, options);
+    return {
+      ...readResult(String(res?.stdout || "")),
+      action: "create",
+      account,
+      at: new Date().toISOString(),
+    };
   }
 
   if (item.action === "update") {
@@ -168,12 +216,18 @@ export async function applyProposal(item) {
     if (!Object.keys(payload).length) {
       throw new CalendarRefused("This proposal changes nothing.");
     }
-    const out = await run(["update", account, String(item.eventId), JSON.stringify(payload)]);
+    const res = await call(
+      "/v1/calendar/update",
+      "POST",
+      { account, eventId: String(item.eventId), payload },
+      options,
+    );
+    const parsed = readResult(String(res?.stdout || ""));
     return {
-      ...readResult(out),
-      eventId: readResult(out).eventId || String(item.eventId),
+      ...parsed,
+      eventId: parsed.eventId || String(item.eventId),
       action: "update",
-      account: item.account,
+      account,
       at: new Date().toISOString(),
     };
   }

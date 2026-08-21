@@ -26,23 +26,57 @@
 //   ORDERLY_BROKER_SOCKET    orchestration broker UNIX socket (default
 //                            ~/.orderly/broker.sock). The operator credential
 //                            arrives per request and is only forwarded.
+//   ORDERLY_DASHBOARD_CONFIG explicit, host-owned quota subscription config
+//                            (default ~/.orderly/dashboard-subscriptions.json).
+//   ORDERLY_DASHBOARD_CACHE  normalized mode-0600 snapshot cache (default
+//                            ~/.orderly/dashboard-cache.json).
+//   ORDERLY_CODEXBAR_ENDPOINT
+//                            loopback `codexbar serve` origin for subscriptions
+//                            whose source is codexbar-loopback (default
+//                            http://127.0.0.1:18791). Loopback addresses only;
+//                            anything else disables that transport.
 
 import { createServer, request as httpRequest } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { extname, join, normalize, resolve } from "node:path";
+import { homedir } from "node:os";
+import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readSettings, writeSettings, Refused } from "./settings.mjs";
 import { readQueue, decide, observeDraft, observeProposal, QueueRefused } from "./queue.mjs";
 import { applyProposal, calendarConfigured, CalendarRefused } from "./calendar.mjs";
+import {
+  deriveDashboard,
+  DEFAULT_CODEXBAR_ENDPOINT,
+  QuotaAdapter,
+  QuotaProbeError,
+} from "./dashboard.mjs";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
-const PUBLIC_DIR = join(HERE, "public");
+const PUBLIC_DIR = resolve(HERE, "public");
+const THEME_MASCOTS = new Map(
+  ["tidepool", "blue-hour", "dispatch", "evergreen", "afterglow"].map((name) => [
+    `/theme-mascots/${name}.svg`,
+    join(PUBLIC_DIR, "theme-mascots", `${name}.svg`),
+  ]),
+);
+
+export function themeMascotPath(urlPath) {
+  return THEME_MASCOTS.get(urlPath) || null;
+}
+
+export function publicAssetPath(urlPath) {
+  const clean = normalize(decodeURIComponent(urlPath)).replace(/^(\.\.[/\\])+/, "");
+  const target = clean === "/" || clean === "" ? "/index.html" : clean;
+  const filePath = resolve(PUBLIC_DIR, `.${target}`);
+  const fromPublic = relative(PUBLIC_DIR, filePath);
+  return fromPublic && !fromPublic.startsWith("..") && !isAbsolute(fromPublic) ? filePath : null;
+}
 
 const WEB_PORT = Number(process.env.ORDERLY_WEB_PORT || 18790);
 const GATEWAY_PORT = Number(process.env.ORDERLY_GATEWAY_PORT || 18789);
 const CONFIG_PATH =
-  process.env.ORDERLY_CONFIG || join(process.env.HOME || "", ".openclaw", "openclaw.json");
+  process.env.ORDERLY_CONFIG || join(homedir(), ".openclaw", "openclaw.json");
 // A list, because a deployment can legitimately keep its keys in more than one
 // place: ~/.openclaw/.env holds the gateway's own bearer, while a model key may
 // be lifted from elsewhere by start-gateway.sh. Reading only the first would
@@ -60,6 +94,16 @@ const SERVICE = "orderly-gateway.service";
 const BROKER_SOCKET =
   process.env.ORDERLY_BROKER_SOCKET ||
   join(process.env.HOME || "", ".orderly", "broker.sock");
+const DASHBOARD_CONFIG =
+  process.env.ORDERLY_DASHBOARD_CONFIG ||
+  join(process.env.HOME || "", ".orderly", "dashboard-subscriptions.json");
+const DASHBOARD_CACHE =
+  process.env.ORDERLY_DASHBOARD_CACHE ||
+  join(process.env.HOME || "", ".orderly", "dashboard-cache.json");
+// The loopback `codexbar serve` run by the credential-owning user. Subscriptions
+// declaring source codexbar-loopback are read from here, so this service needs
+// no provider credential of its own. Asserted loopback in dashboard.mjs.
+const CODEXBAR_ENDPOINT = process.env.ORDERLY_CODEXBAR_ENDPOINT || DEFAULT_CODEXBAR_ENDPOINT;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -194,7 +238,7 @@ function consoleUrl(hostHeader) {
   return loopback ? `http://${host}:${GATEWAY_PORT}/openclaw/` : "/openclaw/";
 }
 
-async function handleStatus(req, res) {
+async function statusSnapshot(req) {
   const [gateway, service, facts] = await Promise.all([
     probeGateway(),
     probeService(),
@@ -210,6 +254,11 @@ async function handleStatus(req, res) {
     consoleUrl: consoleUrl(req.headers.host),
     checkedAt: new Date().toISOString(),
   };
+  return payload;
+}
+
+async function handleStatus(req, res) {
+  const payload = await statusSnapshot(req);
   const body = JSON.stringify(payload);
   securityHeaders(res);
   res.writeHead(200, {
@@ -550,7 +599,7 @@ async function handleSettingsGet(req, res) {
     sendJson(res, 500, {
       error:
         err?.code === "ENOENT"
-          ? "This station's config file isn't where this page expects it."
+          ? "The gateway config is not readable from this desk's identity. On identity-split stations that is by design; gateway settings are managed on the host."
           : "The config file couldn't be read as JSON. Nothing was changed.",
     });
   }
@@ -813,7 +862,7 @@ async function handleQueueGet(_req, res) {
     // A station whose calendar accounts are not wired shows the proposal and
     // says plainly that approving it would fail, instead of offering a button
     // that throws.
-    sendJson(res, 200, { ...queue, calendarWrite: calendarConfigured() });
+    sendJson(res, 200, { ...queue, calendarWrite: await calendarConfigured() });
   } catch {
     sendJson(res, 200, {
       state: "error",
@@ -845,7 +894,7 @@ async function handleQueuePost(req, res) {
       execute: applyProposal,
     });
     const queue = await readQueue({ pendingPath: PENDING_PATH, statePath: QUEUE_STATE_PATH });
-    sendJson(res, 200, { ok: true, ...result, queue: { ...queue, calendarWrite: calendarConfigured() } });
+    sendJson(res, 200, { ok: true, ...result, queue: { ...queue, calendarWrite: await calendarConfigured() } });
   } catch (err) {
     if (err instanceof QueueRefused) return jsonError(res, 409, err.message);
     // A calendar write that failed leaves the card WAITING, deliberately: the
@@ -975,11 +1024,136 @@ const handleBrokerProxy = createBrokerProxy({
   securityHeaders,
 });
 
+// ---------------------------------------------------------------------------
+// dashboard — one read-only aggregate and one bounded quota refresh request
+// ---------------------------------------------------------------------------
+
+const quotaAdapter = new QuotaAdapter({
+  configPath: DASHBOARD_CONFIG,
+  cachePath: DASHBOARD_CACHE,
+  endpoint: CODEXBAR_ENDPOINT,
+});
+
+function readBrokerLanes(requestImpl = httpRequest, socketPath = BROKER_SOCKET) {
+  return new Promise((resolveRead) => {
+    let request;
+    try {
+      request = requestImpl({
+        socketPath,
+        path: "/v1/lanes",
+        method: "GET",
+        headers: { Accept: "application/json" },
+      });
+    } catch {
+      resolveRead({ online: false, lanes: [] });
+      return;
+    }
+    request.setTimeout(BROKER_TIMEOUT_MS, () => request.destroy(new Error("broker-timeout")));
+    request.once("error", () => resolveRead({ online: false, lanes: [] }));
+    request.once("response", (response) => {
+      if (response.statusCode !== 200) {
+        response.resume();
+        resolveRead({ online: false, lanes: [] });
+        return;
+      }
+      const chunks = [];
+      let size = 0;
+      response.on("data", (chunk) => {
+        size += chunk.length;
+        if (size <= 1024 * 1024) chunks.push(chunk);
+        else request.destroy(new Error("broker-response-too-large"));
+      });
+      response.once("error", () => resolveRead({ online: false, lanes: [] }));
+      response.once("end", () => {
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          resolveRead({ online: true, lanes: Array.isArray(parsed) ? parsed : [] });
+        } catch {
+          resolveRead({ online: false, lanes: [] });
+        }
+      });
+    });
+    request.end();
+  });
+}
+
+async function readDashboardOrders() {
+  try {
+    const queue = await readQueue({ pendingPath: PENDING_PATH, statePath: QUEUE_STATE_PATH });
+    return { ...queue, calendarWrite: calendarConfigured() };
+  } catch {
+    return {
+      state: "error",
+      counts: { pending: 0, events: 0, approved: 0, discarded: 0 },
+      calendarWrite: calendarConfigured(),
+    };
+  }
+}
+
+async function dashboardSnapshot(req) {
+  const [station, broker, orders, quotaResult] = await Promise.all([
+    statusSnapshot(req),
+    readBrokerLanes(),
+    readDashboardOrders(),
+    quotaAdapter.rows().then(
+      (rows) => ({ rows, error: false }),
+      () => ({ rows: [], error: true }),
+    ),
+  ]);
+  const payload = deriveDashboard({
+    station,
+    broker,
+    orders,
+    subscriptions: quotaResult.rows,
+  });
+  if (quotaResult.error) {
+    payload.attention.push({
+      id: "quota-config-unavailable",
+      label: "Quota configuration unavailable",
+      detail: "The host-owned subscription configuration could not be read.",
+      href: "/dashboard",
+    });
+  }
+  return payload;
+}
+
+export function createDashboardHandlers({
+  originCheck,
+  snapshot,
+  refresh,
+  jsonReply,
+  errorReply,
+}) {
+  return {
+    async get(req, res) {
+      jsonReply(res, 200, await snapshot(req));
+    },
+    async post(req, res) {
+      if (!originCheck(req)) return errorReply(res, 403, "That request didn't come from this page.");
+      try {
+        await refresh();
+        jsonReply(res, 200, await snapshot(req));
+      } catch (error) {
+        if (error instanceof QuotaProbeError && /rate-limited/.test(error.message)) {
+          return errorReply(res, 429, "Quota refresh is available once every five minutes.");
+        }
+        return errorReply(res, 503, "The quota snapshot could not be refreshed. Last known data was kept.");
+      }
+    },
+  };
+}
+
+const dashboardHandlers = createDashboardHandlers({
+  originCheck: sameOrigin,
+  snapshot: dashboardSnapshot,
+  refresh: () => quotaAdapter.refresh({ manual: true }),
+  jsonReply: sendJson,
+  errorReply: jsonError,
+});
+
 async function handleStatic(req, res, urlPath) {
-  const clean = normalize(decodeURIComponent(urlPath)).replace(/^(\.\.[/\\])+/, "");
-  const target = clean === "/" || clean === "" ? "/index.html" : clean;
-  const filePath = join(PUBLIC_DIR, target);
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  const filePath = publicAssetPath(urlPath);
+  if (!filePath) {
     securityHeaders(res);
     res.writeHead(403).end("Forbidden");
     return;
@@ -991,6 +1165,28 @@ async function handleStatic(req, res, urlPath) {
     securityHeaders(res);
     res.writeHead(200, {
       "Content-Type": MIME[extname(filePath)] || "application/octet-stream",
+      "Cache-Control": "no-cache",
+      "Content-Length": body.length,
+    });
+    res.end(body);
+  } catch {
+    securityHeaders(res);
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
+  }
+}
+
+async function handleThemeMascot(req, res, urlPath) {
+  const filePath = themeMascotPath(urlPath);
+  if (!filePath) {
+    securityHeaders(res);
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
+    return;
+  }
+  try {
+    const body = await readFile(filePath);
+    securityHeaders(res);
+    res.writeHead(200, {
+      "Content-Type": "image/svg+xml",
       "Cache-Control": "no-cache",
       "Content-Length": body.length,
     });
@@ -1030,6 +1226,9 @@ const server = createServer((req, res) => {
   if (urlPath === "/api/queue" && req.method === "POST") {
     return void handleQueuePost(req, res);
   }
+  if (urlPath === "/api/dashboard/refresh" && req.method === "POST") {
+    return void dashboardHandlers.post(req, res);
+  }
   if (req.method !== "GET" && req.method !== "HEAD") {
     securityHeaders(res);
     res.writeHead(405).end("Method not allowed");
@@ -1040,6 +1239,7 @@ const server = createServer((req, res) => {
   if (urlPath === "/api/queue") return void handleQueueGet(req, res);
   if (urlPath === "/api/settings") return void handleSettingsGet(req, res);
   if (urlPath === "/api/settings/health") return void handleSettingsHealth(req, res);
+  if (urlPath === "/api/dashboard") return void dashboardHandlers.get(req, res);
   // a real path for the settings page, so it can be bookmarked and linked
   if (urlPath === "/settings" || urlPath === "/settings/") {
     return void handleStatic(req, res, "/settings.html");
@@ -1047,17 +1247,25 @@ const server = createServer((req, res) => {
   if (urlPath === "/orchestration" || urlPath === "/orchestration/") {
     return void handleStatic(req, res, "/orchestration.html");
   }
+  if (urlPath === "/dashboard" || urlPath === "/dashboard/") {
+    return void handleStatic(req, res, "/dashboard.html");
+  }
   if (urlPath === "/healthz") {
     securityHeaders(res);
     res.writeHead(200, { "Content-Type": "application/json" }).end('{"ok":true}');
     return;
+  }
+  if (urlPath.startsWith("/theme-mascots/")) {
+    return void handleThemeMascot(req, res, urlPath);
   }
   return void handleStatic(req, res, urlPath);
 });
 
 if (resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
   server.listen(WEB_PORT, "127.0.0.1", () => {
-    console.log(`[orderly-web] listening on http://127.0.0.1:${WEB_PORT} (gateway :${GATEWAY_PORT})`);
+    const address = server.address();
+    const listeningPort = typeof address === "object" && address ? address.port : WEB_PORT;
+    console.log(`[orderly-web] listening on http://127.0.0.1:${listeningPort} (gateway :${GATEWAY_PORT})`);
   });
 
   for (const sig of ["SIGINT", "SIGTERM"]) {

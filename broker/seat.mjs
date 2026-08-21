@@ -11,9 +11,8 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
-const REPO_ROOT = resolve(HERE, "..");
-const DEFAULT_ORDERS_PATH = join(REPO_ROOT, "config", "agents", "orderly-orchestrator-AGENTS.md");
-const DEFAULT_SCHEMA_PATH = join(REPO_ROOT, "trial-seat", "packets", "schema.md");
+export const DEFAULT_ORDERS_PATH = join(HERE, "defaults", "AGENTS.example.md");
+export const DEFAULT_SCHEMA_PATH = join(HERE, "defaults", "packet-schema.md");
 const MAX_OUTPUT = 1024 * 1024;
 
 export const DEFAULT_SEAT_TIMEOUT_MS = 300_000;
@@ -51,7 +50,14 @@ function copyAllowlist(allowlist) {
   const repos = Array.isArray(allowlist?.repos) ? allowlist.repos : [];
   const presets = Array.isArray(allowlist?.presets) ? allowlist.presets : [];
   return {
-    repos: repos.map(({ repo_id, branch }) => ({ repo_id, branch })),
+    // has_context_pack tells the seat the broker will supply grounding for this
+    // repo, so it does not spend the brief re-describing the codebase. The pack
+    // itself never enters the packet: it is bulk, and the seat authors briefs.
+    repos: repos.map(({ repo_id, branch, has_context_pack }) => ({
+      repo_id,
+      branch,
+      has_context_pack: Boolean(has_context_pack),
+    })),
     presets: presets.map(({ preset_id, timeout_max_s }) => ({ preset_id, timeout_max_s })),
   };
 }
@@ -211,11 +217,14 @@ export class SeatInvoker {
     command = PINNED_SEAT_COMMAND,
     args = PINNED_SEAT_ARGS,
     timeoutMs = DEFAULT_SEAT_TIMEOUT_MS,
-    ordersPath = DEFAULT_ORDERS_PATH,
-    schemaPath = DEFAULT_SCHEMA_PATH,
+    environment = process.env,
+    ordersPath = environment.ORDERLY_SEAT_ORDERS_PATH || DEFAULT_ORDERS_PATH,
+    schemaPath = environment.ORDERLY_SEAT_SCHEMA_PATH || DEFAULT_SCHEMA_PATH,
   } = {}) {
     // command/args are a narrow node:test seam. DispatchBroker constructs this
-    // class without overrides, so the production tuple above remains pinned.
+    // class without command overrides, so the production tuple remains pinned.
+    // Artifact path overrides are operator configuration and may intentionally
+    // point outside broker/; broker-local publishable artifacts are the fallback.
     this.command = command;
     this.args = [...args];
     this.timeoutMs = timeoutMs;

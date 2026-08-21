@@ -8,6 +8,8 @@
 // No credential is ever rendered, requested or held here. Where a provider needs
 // one, the page shows the environment variable's NAME and whether it is set.
 
+import { DEFAULT_THEME, THEMES, getTheme, setTheme } from "./themes.js";
+
 const el = (id) => document.getElementById(id);
 
 function add(parent, tag, className, text) {
@@ -200,6 +202,47 @@ function field(parent, name, note, control) {
 }
 
 // --- panels ----------------------------------------------------------------
+
+function renderAppearance(message = "") {
+  const host = el("theme-grid");
+  clear(host);
+  const selected = getTheme();
+  for (const theme of THEMES) {
+    const button = add(host, "button", `theme-choice${theme.id === selected ? " is-on" : ""}`);
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(theme.id === selected));
+    button.setAttribute("aria-label", `Use ${theme.name} theme`);
+
+    const preview = add(button, "span", "theme-choice__preview");
+    const mascot = add(preview, "img", "theme-choice__mascot");
+    mascot.src = theme.mascot;
+    mascot.alt = "";
+    mascot.width = 52;
+    mascot.height = 52;
+    const colors = add(preview, "span", "theme-choice__swatches");
+    for (const color of theme.swatches) {
+      const swatch = add(colors, "span", "theme-choice__swatch");
+      swatch.style.backgroundColor = color;
+    }
+
+    const copy = add(button, "span", "theme-choice__copy");
+    add(copy, "span", "theme-choice__name", theme.name);
+    add(copy, "span", "theme-choice__note", theme.note);
+    add(copy, "span", "theme-choice__candidate", theme.candidate);
+    button.addEventListener("click", () => {
+      const result = setTheme(theme.id);
+      renderAppearance(
+        result.persisted
+          ? `${theme.name} selected · saved in this browser.`
+          : `${theme.name} selected for this page, but this browser refused storage.`,
+      );
+    });
+  }
+  el("theme-state").textContent = message ||
+    (selected === DEFAULT_THEME
+      ? "Night Desk is active · no theme preference is stored."
+      : `${THEMES.find((theme) => theme.id === selected)?.name} is active · saved in this browser.`);
+}
 
 function renderModels() {
   const host = el("defaults-fields");
@@ -495,6 +538,7 @@ function renderDuty() {
 }
 
 function render() {
+  renderAppearance();
   renderModels();
   renderProviders();
   renderDuty();
@@ -670,4 +714,5 @@ el("bar-where").textContent =
     ? "Private station · tunnel"
     : "Private station · tailnet";
 
+renderAppearance();
 load();

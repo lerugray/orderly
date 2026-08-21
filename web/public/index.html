@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>ORDERLY</title>
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#161E2E" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#161E2E" data-theme-color data-default-content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" data-theme-icon data-default-href="/favicon.svg" />
     <link rel="stylesheet" href="/orderly.css" />
   </head>
   <body>
@@ -14,11 +14,12 @@
 
     <header class="bar">
       <div class="bar__brand">
-        <img class="bar__mark" src="/mark.svg" alt="" width="26" height="26" />
+        <img class="bar__mark" src="/mark.svg" data-theme-mascot data-default-src="/mark.svg" alt="" width="26" height="26" />
         <span class="wordmark">Orderly</span>
       </div>
       <nav class="nav" aria-label="Sections">
         <a class="nav__link is-here" href="/" aria-current="page">Station</a>
+        <a class="nav__link" href="/dashboard">Dashboard</a>
         <a class="nav__link" href="/orchestration">Orchestration</a>
         <a class="nav__link" href="/settings">Settings</a>
       </nav>
@@ -30,7 +31,8 @@
       <section class="duty" id="duty" data-state="checking" aria-live="polite">
         <div class="duty__figure">
           <svg
-            class="mascot"
+            class="mascot mascot--default"
+            data-default-mascot
             viewBox="0 0 32 32"
             role="img"
             aria-label="The ORDERLY mascot"
@@ -55,6 +57,7 @@
             <circle class="m-ring" cx="16" cy="17.5" r="5.5" />
             <path class="m-mouth" d="M13.5 23 Q16 25.5 18.5 23" />
           </svg>
+          <img class="mascot mascot--themed" data-themed-mascot src="/mark.svg" alt="The ORDERLY mascot" hidden />
         </div>
 
         <div class="duty__body">
@@ -323,6 +326,7 @@
       <p>ORDERLY runs on hardware you own, on subscriptions you already pay for.</p>
     </footer>
 
+    <script src="/themes.js" type="module"></script>
     <script src="/orderly.js" type="module"></script>
   </body>
 </html>

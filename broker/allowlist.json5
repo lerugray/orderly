@@ -10,6 +10,14 @@
   // Windows-mounted, Mac-synced, or operator working tree. The broker resolves
   // the named branch to a committed SHA, then clones a clean detached checkout
   // under ~/.orderly/lanes/<lane-id>/worktree.
+  // Each repo entry may also carry an OPTIONAL "context_pack_path": an absolute
+  // path to a host-maintained code map + this repo's conventions. The broker
+  // attaches it to every lane brief for the repo (grounding first, the operator
+  // brief last) so workers stop re-exploring the project. It is host-owned text,
+  // hashed into the digest the operator confirms, capped at 128 KiB, and read
+  // fresh on every proposal — edit it without restarting the broker. A path that
+  // is missing, empty, oversized or relative refuses to boot the broker, on
+  // purpose: silent loss of grounding is worse than a loud refusal.
   "repos": [
     {
       // Fixture only: replace this host-owned path during deployment with the
@@ -17,6 +25,7 @@
       "repo_id": "fixture-sandbox",
       "url_or_path": "/srv/orderly/fixtures/fixture-sandbox",
       "branch": "main",
+      // "context_pack_path": "/srv/orderly/context-packs/fixture-sandbox.md",
     },
   ],
 

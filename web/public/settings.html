@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Settings · ORDERLY</title>
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#161E2E" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#161E2E" data-theme-color data-default-content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" data-theme-icon data-default-href="/favicon.svg" />
     <link rel="stylesheet" href="/orderly.css" />
   </head>
   <body>
@@ -14,11 +14,12 @@
 
     <header class="bar">
       <div class="bar__brand">
-        <img class="bar__mark" src="/mark.svg" alt="" width="26" height="26" />
+        <img class="bar__mark" src="/mark.svg" data-theme-mascot data-default-src="/mark.svg" alt="" width="26" height="26" />
         <span class="wordmark">Orderly</span>
       </div>
       <nav class="nav" aria-label="Sections">
         <a class="nav__link" href="/">Station</a>
+        <a class="nav__link" href="/dashboard">Dashboard</a>
         <a class="nav__link" href="/orchestration">Orchestration</a>
         <a class="nav__link is-here" href="/settings" aria-current="page">Settings</a>
       </nav>
@@ -29,17 +30,20 @@
       <section class="head">
         <h1 class="head__title">Settings</h1>
         <p class="head__sub">
-          This page changes <strong>which models he thinks with</strong>, and nothing else. The
-          sandbox ruling, the tool denies, the channel allowlist and every credential are shown
-          here as they stand but cannot be edited from a browser — the server refuses the write,
-          by name, if a change would touch them.
+          Choose how this desk looks, or change <strong>which models he thinks with</strong>. The
+          sandbox ruling, the tool denies, the channel allowlist and every credential are still
+          read-only — the server refuses the write, by name, if a model change would touch them.
         </p>
         <p class="head__state" id="head-state" data-state="loading">Reading the station's config…</p>
       </section>
 
       <div class="layout" id="panels">
         <nav class="panelnav" aria-label="Settings sections">
-          <button class="panelnav__opt is-on" type="button" data-panel="models">
+          <button class="panelnav__opt is-on" type="button" data-panel="appearance">
+            <span class="panelnav__name">Appearance</span>
+            <span class="panelnav__note">Palette and mascot</span>
+          </button>
+          <button class="panelnav__opt" type="button" data-panel="models">
             <span class="panelnav__name">Models</span>
             <span class="panelnav__note">What he thinks with</span>
           </button>
@@ -54,8 +58,22 @@
         </nav>
 
         <div class="panels">
+          <!-- ---------------- appearance ---------------- -->
+          <section class="panel is-on" id="panel-appearance" aria-label="Appearance">
+            <div class="fieldset">
+              <h2 class="label">Desk theme</h2>
+              <p class="fieldset__intro">
+                A theme changes only the palette and mascot — never the layout or what this desk
+                can do. The choice is kept in this browser and applies immediately to every desk
+                page. Night Desk is the original look.
+              </p>
+              <div class="theme-grid" id="theme-grid"></div>
+              <p class="theme-state" id="theme-state" role="status"></p>
+            </div>
+          </section>
+
           <!-- ---------------- models ---------------- -->
-          <section class="panel is-on" id="panel-models" aria-label="Models">
+          <section class="panel" id="panel-models" aria-label="Models">
             <div class="fieldset">
               <h2 class="label">The station's models</h2>
               <p class="fieldset__intro">
@@ -170,6 +188,7 @@
       <p>ORDERLY runs on hardware you own, on subscriptions you already pay for.</p>
     </footer>
 
+    <script src="/themes.js" type="module"></script>
     <script src="/settings.js" type="module"></script>
   </body>
 </html>

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { cp, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CANONICAL_SEAT_IDENTITY,
+  DEFAULT_ORDERS_PATH,
+  DEFAULT_SCHEMA_PATH,
   PINNED_SEAT_ARGS,
   PINNED_SEAT_COMMAND,
   SeatInvoker,
@@ -10,8 +16,16 @@ import {
 } from "../seat.mjs";
 import { api, fixtureRepo, startBroker } from "./helpers.mjs";
 
+const TEST_DIR = resolve(fileURLToPath(import.meta.url), "..");
+const BROKER = resolve(TEST_DIR, "..");
+
+function isWithin(parent, child) {
+  const path = relative(parent, child);
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+}
+
 const allowlist = {
-  repos: [{ repo_id: "fixture-sandbox", branch: "main" }],
+  repos: [{ repo_id: "fixture-sandbox", branch: "main", has_context_pack: false }],
   presets: [{ preset_id: "change", timeout_max_s: 600 }],
 };
 
@@ -33,6 +47,110 @@ function dispatchProposal() {
     rationale: "A bounded proposal for operator review.",
   };
 }
+
+test("default seat artifacts ship inside broker while operator paths take precedence", async () => {
+  const defaults = new SeatInvoker({ environment: {} });
+  assert.equal(defaults.ordersPath, DEFAULT_ORDERS_PATH);
+  assert.equal(defaults.schemaPath, DEFAULT_SCHEMA_PATH);
+  assert.equal(isWithin(BROKER, defaults.ordersPath), true);
+  assert.equal(isWithin(BROKER, defaults.schemaPath), true);
+  assert.match(await readFile(defaults.ordersPath, "utf8"), /proposal-only/);
+  assert.match(await readFile(defaults.schemaPath, "utf8"), /exactly one JSON object/);
+
+  const configured = new SeatInvoker({
+    environment: {
+      ORDERLY_SEAT_ORDERS_PATH: "/operator/standing-orders.md",
+      ORDERLY_SEAT_SCHEMA_PATH: "/operator/packet-schema.md",
+    },
+  });
+  assert.equal(configured.ordersPath, "/operator/standing-orders.md");
+  assert.equal(configured.schemaPath, "/operator/packet-schema.md");
+
+  const explicit = new SeatInvoker({
+    environment: {
+      ORDERLY_SEAT_ORDERS_PATH: "/environment/orders.md",
+      ORDERLY_SEAT_SCHEMA_PATH: "/environment/schema.md",
+    },
+    ordersPath: "/constructor/orders.md",
+    schemaPath: "/constructor/schema.md",
+  });
+  assert.equal(explicit.ordersPath, "/constructor/orders.md");
+  assert.equal(explicit.schemaPath, "/constructor/schema.md");
+});
+
+test("top-level broker modules cannot derive a parent-of-broker path from HERE", async () => {
+  const modules = (await readdir(BROKER)).filter((name) => name.endsWith(".mjs"));
+  const escape = /(?:resolve|join)\s*\(\s*HERE\s*,\s*["']\.\.["']/;
+  for (const module of modules) {
+    assert.doesNotMatch(await readFile(resolve(BROKER, module), "utf8"), escape, module);
+  }
+});
+
+test("seat consultation works from a standalone broker-only tree", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "orderly-broker-standalone-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const copiedBroker = join(temporary, "broker");
+  await cp(BROKER, copiedBroker, { recursive: true });
+  const standaloneBroker = await realpath(copiedBroker);
+  const standaloneSeatUrl = pathToFileURL(join(standaloneBroker, "seat.mjs"));
+  standaloneSeatUrl.searchParams.set("standalone", String(Date.now()));
+  const { SeatInvoker: StandaloneSeatInvoker } = await import(standaloneSeatUrl.href);
+  const proposal = { decision: "refuse", rationale: "Standalone default artifacts loaded." };
+  const script = `const fs=require("node:fs");process.stderr.write("model: gpt-5.6-sol\\n");process.stdin.resume();process.stdin.on("end",()=>fs.writeFileSync("../proposal.txt",${JSON.stringify(JSON.stringify(proposal))}))`;
+  const invoker = new StandaloneSeatInvoker({
+    command: process.execPath,
+    args: ["-e", script],
+    environment: {},
+    timeoutMs: 2_000,
+  });
+
+  assert.deepEqual(
+    await invoker.consult({ ask: "standalone consultation", allowlist, laneRegistry: [] }),
+    { proposal },
+  );
+  assert.equal(isWithin(standaloneBroker, invoker.ordersPath), true);
+  assert.equal(isWithin(standaloneBroker, invoker.schemaPath), true);
+});
+
+test("configured operator artifacts are read instead of the generic fallbacks", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "orderly-seat-configured-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const ordersPath = join(temporary, "standing-orders.md");
+  const schemaPath = join(temporary, "packet-schema.md");
+  await Promise.all([
+    writeFile(ordersPath, "OPERATOR_STANDING_ORDERS\n"),
+    writeFile(schemaPath, "OPERATOR_SCHEMA_CONTRACT\n"),
+  ]);
+  const script = String.raw`
+    const fs = require("node:fs");
+    process.stderr.write("model: gpt-5.6-sol\n");
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => input += chunk);
+    process.stdin.on("end", () => {
+      const loaded = input.includes("OPERATOR_STANDING_ORDERS")
+        && input.includes("OPERATOR_SCHEMA_CONTRACT");
+      fs.writeFileSync("../proposal.txt", JSON.stringify({
+        decision: "refuse",
+        rationale: loaded ? "Configured artifacts loaded." : "Configured artifacts missing.",
+      }));
+    });
+  `;
+  const invoker = new SeatInvoker({
+    command: process.execPath,
+    args: ["-e", script],
+    environment: {
+      ORDERLY_SEAT_ORDERS_PATH: ordersPath,
+      ORDERLY_SEAT_SCHEMA_PATH: schemaPath,
+    },
+    timeoutMs: 2_000,
+  });
+
+  assert.deepEqual(
+    await invoker.consult({ ask: "configured consultation", allowlist, laneRegistry: [] }),
+    { proposal: { decision: "refuse", rationale: "Configured artifacts loaded." } },
+  );
+});
 
 test("production seat command and argv are the exact pinned tuple", () => {
   assert.equal(PINNED_SEAT_COMMAND, "codex");
@@ -252,7 +370,9 @@ test("consult endpoint is token-gated and cannot mutate the registry", async (t)
   });
   assert.equal(calls, 1);
   assert.equal(captured.ask, "hello verbatim");
-  assert.deepEqual(captured.allowlist.repos, [{ repo_id: "fixture-sandbox", branch: "main" }]);
+  assert.deepEqual(captured.allowlist.repos, [
+    { repo_id: "fixture-sandbox", branch: "main", has_context_pack: false },
+  ]);
   assert.ok(captured.allowlist.presets.every((preset) => (
     Object.keys(preset).sort().join(",") === "preset_id,timeout_max_s"
   )));
