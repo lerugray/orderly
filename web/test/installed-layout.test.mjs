@@ -96,11 +96,24 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   const mark = await get("/mark.svg");
   assert.equal(mark.status, 200);
   assert.match(mark.headers.get("content-type") || "", /^image\/svg\+xml/);
+  const markSvg = await mark.text();
 
   for (const theme of THEMES.slice(1)) {
     const mascot = await get(theme.mascot);
     assert.equal(mascot.status, 200, theme.mascot);
-    assert.match(await mascot.text(), /^<svg[^>]+viewBox="0 0 32 32">/);
+    const svg = await mascot.text();
+    assert.match(svg, /^<svg[^>]+viewBox="0 0 32 32">/);
+    // Each variant route serves that variant's own artwork. Serving the default
+    // here would look exactly like the palette-only swap the hero bug produced.
+    assert.notEqual(svg, markSvg, `${theme.id} served the default mascot`);
+    assert.equal(svg, await readFile(join(installed, "public", "theme-mascots", `${theme.id}.svg`), "utf8"));
+    // The hero fetches this exact file and inlines it to work the eye, so a
+    // flat install serving artwork without the moving parts ships a mascot that
+    // sits there — from the page's side, the old <img> hero all over again.
+    assert.match(svg, /<g class="m-pupil">/, `${theme.id} served artwork with no pupil to move`);
+    assert.match(svg, /<rect class="m-lid"[^>]*data-lid-close="/, `${theme.id} served artwork with no lid`);
+    assert.match(svg, /<path class="m-mouth"[^>]*data-mouth-flat="/, `${theme.id} served artwork with one mouth`);
+    assert.match(svg, new RegExp(`id="eyeClip-${theme.id}"`), `${theme.id} served artwork with no eye clip`);
   }
 
   const settingsPage = await get("/settings");
@@ -119,5 +132,23 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   assert.equal(station.status, 200);
   assert.match(stationHtml, /data-default-mascot/);
   assert.match(stationHtml, /src="\/mark\.svg" data-theme-mascot/);
+
+  // The hero swap ships as wiring, not only as artwork. A flat install that
+  // serves five variant files but hides nothing is exactly today's defect.
+  const themeModule = await get("/themes.js");
+  assert.equal(themeModule.status, 200);
+  const themeSource = await themeModule.text();
+  assert.match(themeSource, /toggleAttribute\("hidden"/);
+  assert.doesNotMatch(themeSource, /\.hidden\s*=/, "`.hidden =` does nothing on the inline <svg> mascot");
+  assert.match(themeSource, /data-mascot-src/, "the hero slot must be told which variant file to draw");
+
+  // And the module that draws it ships too, or the themed hero stays an empty
+  // <svg>: a flat install can serve every asset and still show nothing.
+  const stationModule = await get("/orderly.js");
+  assert.equal(stationModule.status, 200);
+  const stationSource = await stationModule.text();
+  assert.match(stationSource, /data-themed-mascot/);
+  assert.match(stationSource, /bindMascot\(visibleMascot\(\)\)/);
+
   assert.equal(ready.stderr(), "");
 });

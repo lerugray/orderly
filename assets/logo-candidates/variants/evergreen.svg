@@ -1,11 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <!-- Evergreen theme, derived from cand-5 -->
+  <!-- The same drawing, restructured so the desk can work the eye: the pupil is
+       a group to translate, the lid is a rect clipped to the eye, and the mouth
+       carries both of its shapes. Every element keeps its own paint, so this
+       file still renders unchanged as a plain image with no stylesheet. -->
+  <defs>
+    <clipPath id="eyeClip-evergreen"><circle cx="16" cy="17.5" r="5.5"/></clipPath>
+  </defs>
   <circle cx="16" cy="18.5" r="11.5" fill="#45C98B" stroke="#0F2E1F" stroke-width="1.4"/>
   <path d="M8.5 11 Q16 7 23.5 10.5" fill="none" stroke="#0F2E1F" stroke-width="1.4" stroke-linecap="round"/>
   <path d="M9.5 10.8 L10.5 5.5 Q16 3.5 22.5 6 L23.5 10.5" fill="#BFEBD3" stroke="#0F2E1F" stroke-width="1.4" stroke-linejoin="round"/>
-  <circle cx="16" cy="17.5" r="5.5" fill="#FFFFFF" stroke="#0F2E1F" stroke-width="1.2"/>
-  <circle cx="16" cy="17.5" r="2.7" fill="#0F2E1F"/>
-  <circle cx="14.5" cy="16" r="1" fill="#FFFFFF"/>
+  <circle cx="16" cy="17.5" r="5.5" fill="#FFFFFF"/>
+  <g clip-path="url(#eyeClip-evergreen)">
+    <g class="m-pupil">
+      <circle cx="16" cy="17.5" r="2.7" fill="#0F2E1F"/>
+      <circle cx="14.5" cy="16" r="1" fill="#FFFFFF"/>
+    </g>
+    <rect class="m-lid" x="9.5" y="0" width="13" height="12" fill="#45C98B" data-lid-close="11"/>
+  </g>
+  <circle cx="16" cy="17.5" r="5.5" fill="none" stroke="#0F2E1F" stroke-width="1.2"/>
   <path d="M11.5 16 Q16 13 20.5 16" fill="none" stroke="#0F2E1F" stroke-width="1" stroke-linecap="round" opacity="0.35"/>
-  <path d="M13 23 Q16 25 19 23" fill="none" stroke="#0F2E1F" stroke-width="1.2" stroke-linecap="round"/>
+  <path class="m-mouth" d="M13 23 Q16 25 19 23" fill="none" stroke="#0F2E1F" stroke-width="1.2" stroke-linecap="round" data-mouth-smile="M13 23 Q16 25 19 23" data-mouth-flat="M13 23.6 Q16 23.2 19 23.6"/>
 </svg>

@@ -1,0 +1,34 @@
+[Unit]
+Description=CodexBar loopback usage server (ORDERLY quota source)
+Documentation=https://github.com/steipete/CodexBar/blob/v0.49.6/docs/cli.md
+After=network-online.target
+
+[Service]
+Type=simple
+# Loopback ONLY. No --dashboard-token: ORDERLY reads GET /usage, which is
+# unauthenticated on a loopback bind, so the desk service holds no secret.
+# --identity redacted keeps account local-parts out of dashboard responses.
+ExecStart=%h/.local/bin/codexbar serve --host 127.0.0.1 --port 18791 --identity redacted --refresh-interval 60 --request-timeout 30
+Restart=always
+RestartSec=5
+# Credentials stay with this (operator-owned) unit and never reach orderly-web.
+Environment=HOME=%h
+Environment=NO_COLOR=1
+Environment=LANG=C.UTF-8
+WorkingDirectory=%h
+# Hardening: this process reads credentials; keep its blast radius small.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/codexbar %h/.cache
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# Loopback plus outbound provider fetches only.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

@@ -57,7 +57,20 @@
             <circle class="m-ring" cx="16" cy="17.5" r="5.5" />
             <path class="m-mouth" d="M13.5 23 Q16 25.5 18.5 23" />
           </svg>
-          <img class="mascot mascot--themed" data-themed-mascot src="/mark.svg" alt="The ORDERLY mascot" hidden />
+          <!-- The themed slot is an inline <svg>, not an <img>, because the
+               mascot is an instrument: the page has to reach inside it to blink
+               the lid, follow the pointer with the pupil and set the mouth. An
+               <img> keeps that art sealed away, which is why every variant sat
+               still. orderly.js fills this from the chosen variant's own file. -->
+          <svg
+            class="mascot mascot--themed"
+            data-themed-mascot
+            viewBox="0 0 32 32"
+            role="img"
+            aria-label="The ORDERLY mascot"
+            xmlns="http://www.w3.org/2000/svg"
+            hidden
+          ></svg>
         </div>
 
         <div class="duty__body">

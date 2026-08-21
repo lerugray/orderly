@@ -1,11 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <!-- Blue Hour theme, derived from cand-3 -->
+  <!-- The same drawing, restructured so the desk can work the eye: the pupil is
+       a group to translate, the lid is a rect clipped to the eye, and the mouth
+       carries both of its shapes. Every element keeps its own paint, so this
+       file still renders unchanged as a plain image with no stylesheet. -->
+  <defs>
+    <clipPath id="eyeClip-blue-hour"><circle cx="16" cy="18" r="5.8"/></clipPath>
+  </defs>
   <circle cx="16" cy="19" r="11" fill="#8178FF" stroke="#18142F" stroke-width="1.5"/>
   <path d="M9 11.5 Q16 8 23 11.5" fill="none" stroke="#18142F" stroke-width="1.4" stroke-linecap="round"/>
   <path d="M9.5 11.5 L9.5 7 Q16 4.5 22.5 7 L22.5 11.5" fill="#C9C4FF" stroke="#18142F" stroke-width="1.4" stroke-linejoin="round"/>
   <circle cx="16" cy="8.5" r="1.2" fill="#18142F"/>
-  <circle cx="16" cy="18" r="5.8" fill="#FFFFFF" stroke="#18142F" stroke-width="1.2"/>
-  <circle cx="16" cy="18" r="3" fill="#18142F"/>
-  <path d="M15 16 L17 18 L15 20" fill="none" stroke="#FFFFFF" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
-  <path d="M13 23.5 Q16 26 19 23.5" fill="none" stroke="#18142F" stroke-width="1.2" stroke-linecap="round"/>
+  <circle cx="16" cy="18" r="5.8" fill="#FFFFFF"/>
+  <g clip-path="url(#eyeClip-blue-hour)">
+    <g class="m-pupil">
+      <circle cx="16" cy="18" r="3" fill="#18142F"/>
+      <path d="M15 16 L17 18 L15 20" fill="none" stroke="#FFFFFF" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+    </g>
+    <rect class="m-lid" x="9.5" y="0" width="13" height="12.2" fill="#8178FF" data-lid-close="11.6"/>
+  </g>
+  <circle cx="16" cy="18" r="5.8" fill="none" stroke="#18142F" stroke-width="1.2"/>
+  <path class="m-mouth" d="M13 23.5 Q16 26 19 23.5" fill="none" stroke="#18142F" stroke-width="1.2" stroke-linecap="round" data-mouth-smile="M13 23.5 Q16 26 19 23.5" data-mouth-flat="M13 24.1 Q16 23.7 19 24.1"/>
 </svg>

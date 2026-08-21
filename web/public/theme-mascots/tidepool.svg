@@ -1,10 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <!-- Tidepool theme, derived from cand-2 -->
+  <!-- The same drawing, restructured so the desk can work the eye: the pupil is
+       a group to translate, the lid is a rect clipped to the eye, and the mouth
+       carries both of its shapes. Every element keeps its own paint, so this
+       file still renders unchanged as a plain image with no stylesheet. -->
+  <defs>
+    <clipPath id="eyeClip-tidepool"><circle cx="16" cy="17.5" r="5.2"/></clipPath>
+  </defs>
   <ellipse cx="16" cy="18.5" rx="12.5" ry="10.5" fill="#3CC7B7" stroke="#102C31" stroke-width="1.4"/>
   <path d="M12 10 L16 14 L20 10" fill="none" stroke="#E8F5F1" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="16" cy="17.5" r="5.2" fill="#FFFFFF" stroke="#102C31" stroke-width="1.2"/>
-  <circle cx="16" cy="17.5" r="2.5" fill="#102C31"/>
-  <circle cx="17.3" cy="16.2" r="0.9" fill="#FFFFFF"/>
-  <circle cx="15.2" cy="18.6" r="0.6" fill="#FFFFFF" opacity="0.8"/>
-  <path d="M13.5 23.5 Q16 25.2 18.5 23.5" fill="none" stroke="#102C31" stroke-width="1.1" stroke-linecap="round"/>
+  <circle cx="16" cy="17.5" r="5.2" fill="#FFFFFF"/>
+  <g clip-path="url(#eyeClip-tidepool)">
+    <g class="m-pupil">
+      <circle cx="16" cy="17.5" r="2.5" fill="#102C31"/>
+      <circle cx="17.3" cy="16.2" r="0.9" fill="#FFFFFF"/>
+      <circle cx="15.2" cy="18.6" r="0.6" fill="#FFFFFF" opacity="0.8"/>
+    </g>
+    <rect class="m-lid" x="10" y="0" width="12" height="12.3" fill="#3CC7B7" data-lid-close="10.4"/>
+  </g>
+  <circle cx="16" cy="17.5" r="5.2" fill="none" stroke="#102C31" stroke-width="1.2"/>
+  <path class="m-mouth" d="M13.5 23.5 Q16 25.2 18.5 23.5" fill="none" stroke="#102C31" stroke-width="1.1" stroke-linecap="round" data-mouth-smile="M13.5 23.5 Q16 25.2 18.5 23.5" data-mouth-flat="M13.5 24.1 Q16 23.7 18.5 24.1"/>
 </svg>

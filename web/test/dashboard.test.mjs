@@ -92,6 +92,125 @@ test("normalization fails closed on provider, percentage, and reset schema misma
   assert.throws(() => normalizeCodexbarUsage(badReset, subscription), QuotaProbeError);
 });
 
+const windowless = validateDashboardConfig(
+  config({
+    id: "ollama-primary",
+    label: "Ollama Cloud",
+    provider: "ollama",
+    source: "codexbar-loopback",
+    probe_source: "api",
+    seat_refs: [],
+    headline_window: "session",
+  }),
+).subscriptions[0];
+
+test("a provider that publishes no quota window renders a status-only row carrying no provider text", () => {
+  const raw = {
+    provider: "ollama",
+    usage: {
+      primary: null,
+      secondary: null,
+      tertiary: null,
+      loginMethod: "API key",
+      identity: { loginMethod: "API key", providerID: "ollama" },
+      updatedAt: "2026-08-21T16:00:00Z",
+      accountEmail: "must-not-reach-browser@example.com",
+    },
+  };
+  const row = normalizeCodexbarUsage(raw, windowless, Date.parse("2026-08-21T16:00:01Z"));
+
+  assert.equal(row.state, "fresh");
+  // Never 0: an absent window is not an exhausted subscription.
+  assert.equal(row.remaining_pct, null);
+  assert.equal(row.resets_at, null);
+  assert.deepEqual(row.windows, []);
+  assert.equal(row.detail, "Active · no quota windows published");
+  assert.equal(row.observed_at, "2026-08-21T16:00:00Z");
+  assert.equal(row.stale_at, "2026-08-21T16:10:00.000Z");
+
+  const serialized = JSON.stringify(row);
+  for (const forbidden of ["identity", "loginMethod", "providerID", "API key", "must-not-reach-browser"]) {
+    assert.equal(serialized.includes(forbidden), false, `${forbidden} reached the row`);
+  }
+});
+
+function ranked(provider, headline_window, windows) {
+  const sub = validateDashboardConfig(
+    config({
+      id: `${provider}-primary`,
+      label: provider,
+      provider,
+      source: "codexbar-loopback",
+      probe_source: provider === "cursor" ? "web" : "api",
+      seat_refs: [],
+      headline_window,
+    }),
+  ).subscriptions[0];
+  return normalizeCodexbarUsage(
+    { provider, usage: { ...windows, updatedAt: "2026-08-21T16:00:00Z" } },
+    sub,
+    Date.parse("2026-08-21T16:00:01Z"),
+  );
+}
+
+test("a genuine session/weekly pair keeps its positional names untouched", () => {
+  // 5-hour primary, weekly secondary — Claude, Codex and Z.ai all report this
+  // shape, and the positional names are already the truth for it.
+  const row = ranked("zai", "session", {
+    primary: { usedPercent: 1.9, windowMinutes: 300, resetsAt: "2026-08-21T21:00:00Z" },
+    secondary: { usedPercent: 20.5, windowMinutes: 10080, resetsAt: "2026-08-24T00:00:00Z" },
+  });
+  assert.deepEqual(row.windows.map((w) => w.kind), ["session", "weekly"]);
+  assert.equal(row.detail, "session 98.1% remaining; weekly 79.5% remaining");
+  assert.equal(row.remaining_pct, 98.1);
+});
+
+test("windows with no declared duration keep their positional names", () => {
+  const row = ranked("zai", "session", {
+    primary: { usedPercent: 28, resetsAt: "2026-08-21T19:15:00Z" },
+    secondary: { usedPercent: 59, resetsAt: "2026-08-25T13:00:00Z" },
+  });
+  assert.deepEqual(row.windows.map((w) => w.kind), ["session", "weekly"]);
+});
+
+test("a rank-inverted pair is named by duration, and its headline number is unchanged", () => {
+  // Kimi Code ranks its weekly request quota FIRST and its 5-hour rate second,
+  // so the positional names reported a session window that does not exist.
+  const row = ranked("kimi", "session", {
+    primary: { usedPercent: 1, windowMinutes: 10080, resetsAt: "2026-08-28T20:24:07Z" },
+    secondary: { usedPercent: 51, windowMinutes: 300, resetsAt: "2026-08-21T21:24:07Z" },
+  });
+  assert.deepEqual(row.windows.map((w) => w.kind), ["weekly", "5-hour"]);
+  // headline_window still selects the same rank it always selected.
+  assert.equal(row.remaining_pct, 99);
+  assert.equal(row.resets_at, "2026-08-28T20:24:07Z");
+});
+
+test("month-long scopes are named monthly and disambiguated by rank, never session or weekly", () => {
+  const row = ranked("cursor", "session", {
+    primary: { usedPercent: 34.54945054945055, windowMinutes: 44640, resetsAt: "2026-09-08T18:24:36Z" },
+    secondary: { usedPercent: 30.57125, windowMinutes: 44640, resetsAt: "2026-09-08T18:24:36Z" },
+    tertiary: { usedPercent: 63.481818181818184, windowMinutes: 44640, resetsAt: "2026-09-08T18:24:36Z" },
+  });
+  assert.deepEqual(row.windows.map((w) => w.kind), [
+    "monthly (primary)",
+    "monthly (secondary)",
+    "monthly (tertiary)",
+  ]);
+  for (const window of row.windows) assert.ok(window.kind.length <= 40);
+  assert.equal(row.remaining_pct, 65.5);
+  assert.equal(JSON.stringify(row).includes("session"), false);
+  assert.equal(JSON.stringify(row).includes("weekly"), false);
+});
+
+test("an unrecognised duration is spelled out rather than named falsely", () => {
+  const row = ranked("zai", "session", {
+    primary: { usedPercent: 10, windowMinutes: 4320, resetsAt: "2026-08-24T00:00:00Z" },
+  });
+  assert.deepEqual(row.windows.map((w) => w.kind), ["3-day"]);
+  assert.equal(row.remaining_pct, 90);
+});
+
 test("the CodexBar probe pins version, fixed argv, minimal environment, and a 30-second bound", async () => {
   const calls = [];
   const fakeExec = (command, args, options, callback) => {
@@ -220,7 +339,9 @@ test("supported providers are frozen and resolve their default local probe sourc
     id: `subscription-${index}`,
     label: provider,
     provider,
-    source: "codexbar-cli",
+    // A web-only provider has no local strategy at all, so it is declarable
+    // only over the loopback transport that keeps the cookie on the serve host.
+    source: SUPPORTED_PROVIDERS[provider].includes("web") ? "codexbar-loopback" : "codexbar-cli",
     seat_refs: [],
   }));
   const validated = validateDashboardConfig(config(...rows)).subscriptions;
@@ -238,7 +359,31 @@ test("supported providers are frozen and resolve their default local probe sourc
     kimi: "cli",
     zai: "api",
     ollama: "api",
+    cursor: "web",
   });
+});
+
+test("a web-only provider is declarable over loopback and refused on every local transport", () => {
+  const cursor = {
+    id: "cursor-primary",
+    label: "Cursor",
+    provider: "cursor",
+    source: "codexbar-loopback",
+    probe_source: "web",
+    seat_refs: [],
+    headline_window: "session",
+  };
+  assert.equal(validateDashboardConfig(config(cursor)).subscriptions[0].probe_source, "web");
+  // The desk must never fetch a provider cookie itself.
+  assert.throws(
+    () => validateDashboardConfig(config({ ...cursor, source: "codexbar-cli" })),
+    /invalid probe_source/,
+  );
+  // Declaring it as some other strategy is still outside the provider allowlist.
+  assert.throws(
+    () => validateDashboardConfig(config({ ...cursor, probe_source: "api" })),
+    /invalid probe_source/,
+  );
 });
 
 test("browser and automatic probe sources are rejected", () => {
@@ -648,16 +793,18 @@ test("the real serve envelope normalizes and strips its identity block", () => {
   }
 });
 
-test("a serve envelope with every window null is unavailable, not zero", () => {
-  // Balance-only providers answer successfully with no quota window at all.
-  // That must read as "unavailable", never as 0% remaining.
+test("a serve envelope with every window null is status-only, never zero", () => {
+  // Balance-only providers, and providers with no token accounting at all,
+  // answer successfully with no quota window. That must never read as 0%
+  // remaining; it reports the steady state and shows no meter.
   const balanceOnly = structuredClone(liveEnvelope);
   balanceOnly.usage.primary = null;
   balanceOnly.usage.secondary = null;
-  assert.throws(
-    () => normalizeCodexbarUsage(balanceOnly, { ...loopbackSubscription, provider: "ollama" }),
-    /no quota windows/,
-  );
+  const row = normalizeCodexbarUsage(balanceOnly, { ...loopbackSubscription, provider: "ollama" });
+  assert.equal(row.remaining_pct, null);
+  assert.equal(row.resets_at, null);
+  assert.deepEqual(row.windows, []);
+  assert.equal(row.detail, "Active · no quota windows published");
 });
 
 test("a provider-level serve error never becomes a populated row", () => {
@@ -684,4 +831,147 @@ test("Kimi Code is a distinct provider from the Moonshot open-platform balance",
   // cli leads kimi's allowlist, so it is the default when none is declared.
   assert.equal(parsed.subscriptions[0].probe_source, "cli");
   assert.equal(parsed.subscriptions[0].provider, "kimi");
+});
+
+const claudeSubscription = {
+  id: "claude-primary",
+  label: "Claude",
+  provider: "claude",
+  source: "codexbar-loopback",
+  probe_source: "oauth",
+  seat_refs: ["orchestrator"],
+  headline_window: "session",
+};
+
+// Captured from the live serve: the Claude subscription reports a third window
+// that is scoped to one model rather than ranked below the other two, and it
+// arrives in a titled list instead of a named field. The desk showed the ranked
+// pair and silently dropped this one.
+const claudeEnvelope = {
+  provider: "claude",
+  source: "oauth",
+  usage: {
+    identity: { loginMethod: "OAuth", accountEmail: "must-not-reach-browser@example.com" },
+    primary: { usedPercent: 41, resetsAt: "2026-08-21T19:00:00Z" },
+    secondary: { usedPercent: 62, resetsAt: "2026-08-28T13:00:00Z" },
+    tertiary: null,
+    extraRateWindows: [
+      {
+        window: {
+          windowMinutes: 10080,
+          usedPercent: 13,
+          resetDescription: "Aug 28 at 9:00AM",
+          resetsAt: "2026-08-28T13:00:00Z",
+        },
+        title: "Fable only",
+        id: "claude-weekly-scoped-fable",
+      },
+    ],
+    updatedAt: "2026-08-21T17:14:11Z",
+  },
+};
+
+test("a scoped extra window is rendered beside the ranked pair, under its own title", () => {
+  const row = normalizeCodexbarUsage(
+    structuredClone(claudeEnvelope),
+    claudeSubscription,
+    Date.parse("2026-08-21T17:14:12Z"),
+  );
+
+  assert.deepEqual(row.windows, [
+    { kind: "session", remaining_pct: 59, resets_at: "2026-08-21T19:00:00Z" },
+    { kind: "weekly", remaining_pct: 38, resets_at: "2026-08-28T13:00:00Z" },
+    { kind: "Fable only", remaining_pct: 87, resets_at: "2026-08-28T13:00:00Z" },
+  ]);
+  // The headline still comes from the ranked window the subscription declared.
+  assert.equal(row.remaining_pct, 59);
+  assert.equal(row.detail, "session 59% remaining; weekly 38% remaining; Fable only 87% remaining");
+  const serialized = JSON.stringify(row);
+  for (const forbidden of ["identity", "accountEmail", "must-not-reach-browser", "windowMinutes"]) {
+    assert.equal(serialized.includes(forbidden), false, `${forbidden} reached the row`);
+  }
+});
+
+test("the extra window's label is whatever the provider titles it, never a fixed name", () => {
+  const renamed = structuredClone(claudeEnvelope);
+  renamed.usage.extraRateWindows = [
+    { window: { usedPercent: 4, resetsAt: "2026-08-28T13:00:00Z" }, title: "Opus only", id: "scoped-opus" },
+    { window: { usedPercent: 90, resetsAt: null }, id: "scoped-untitled" },
+  ];
+  const row = normalizeCodexbarUsage(renamed, claudeSubscription);
+  assert.deepEqual(row.windows.slice(2), [
+    { kind: "Opus only", remaining_pct: 96, resets_at: "2026-08-28T13:00:00Z" },
+    // No title: the identifier names it rather than a made-up one.
+    { kind: "scoped-untitled", remaining_pct: 10, resets_at: null },
+  ]);
+});
+
+test("a provider reporting no extra windows renders exactly the ranked pair", () => {
+  const bare = structuredClone(claudeEnvelope);
+  delete bare.usage.extraRateWindows;
+  const absent = normalizeCodexbarUsage(bare, claudeSubscription, Date.parse("2026-08-21T17:14:12Z"));
+  const explicitNull = structuredClone(claudeEnvelope);
+  explicitNull.usage.extraRateWindows = null;
+  const empty = structuredClone(claudeEnvelope);
+  empty.usage.extraRateWindows = [];
+
+  assert.deepEqual(absent.windows, [
+    { kind: "session", remaining_pct: 59, resets_at: "2026-08-21T19:00:00Z" },
+    { kind: "weekly", remaining_pct: 38, resets_at: "2026-08-28T13:00:00Z" },
+  ]);
+  assert.equal(absent.detail, "session 59% remaining; weekly 38% remaining");
+  for (const variant of [explicitNull, empty]) {
+    const row = normalizeCodexbarUsage(variant, claudeSubscription, Date.parse("2026-08-21T17:14:12Z"));
+    assert.deepEqual(row.windows, absent.windows);
+    assert.equal(row.detail, absent.detail);
+  }
+});
+
+test("a malformed extra window fails closed rather than rendering a made-up bar", () => {
+  for (const broken of [
+    { usage: { extraRateWindows: {} } },
+    { usage: { extraRateWindows: ["Fable only"] } },
+    { usage: { extraRateWindows: [{ title: "Fable only" }] } },
+    { usage: { extraRateWindows: [{ window: { usedPercent: "13" }, title: "Fable only" }] } },
+    { usage: { extraRateWindows: [{ window: { usedPercent: 13, resetsAt: "2026-08-28T09:00" }, title: "x" }] } },
+    { usage: { extraRateWindows: [{ window: { usedPercent: 13 }, title: 7 }] } },
+  ]) {
+    const raw = structuredClone(claudeEnvelope);
+    raw.usage.extraRateWindows = broken.usage.extraRateWindows;
+    assert.throws(() => normalizeCodexbarUsage(raw, claudeSubscription), QuotaProbeError);
+  }
+});
+
+test("a scoped window survives the cache with its label clamped like any other kind", () => {
+  const row = normalizeCodexbarUsage(structuredClone(claudeEnvelope), claudeSubscription);
+  const cached = safeCachedRow(JSON.parse(JSON.stringify(row)), claudeSubscription, Date.parse("2026-08-21T17:15:00Z"));
+  assert.deepEqual(cached.windows, row.windows);
+
+  const overlong = JSON.parse(JSON.stringify(row));
+  overlong.windows[2].kind = "F".repeat(200);
+  assert.equal(safeCachedRow(overlong, claudeSubscription, Date.parse("2026-08-21T17:15:00Z")).windows[2].kind.length, 40);
+});
+
+test("a scoped window reaches the browser snapshot end to end", async (t) => {
+  const paths = await temporary(t);
+  await writeFile(paths.configPath, JSON.stringify(config(claudeSubscription)), "utf8");
+  const adapter = new QuotaAdapter({
+    ...paths,
+    probe: createLoopbackProbe({
+      fetchImpl: fakeServe({ usage: [structuredClone(claudeEnvelope)] }),
+      now: () => Date.parse("2026-08-21T17:14:12Z"),
+    }),
+    now: () => Date.parse("2026-08-21T17:14:12Z"),
+  });
+
+  const [refreshed] = await adapter.refresh({ manual: true });
+  assert.equal(refreshed.state, "fresh");
+  assert.deepEqual(refreshed.windows.map((window) => window.kind), ["session", "weekly", "Fable only"]);
+
+  const [served] = await adapter.rows({ refreshIfStale: false });
+  assert.deepEqual(served.windows.map((window) => window.kind), ["session", "weekly", "Fable only"]);
+  assert.equal(served.windows[2].remaining_pct, 87);
+  const cached = await readFile(paths.cachePath, "utf8");
+  assert.equal(cached.includes("Fable only"), true);
+  assert.equal(cached.includes("must-not-reach-browser"), false);
 });

@@ -50,7 +50,7 @@ unit_environment() {
     $0 ~ "^[[:space:]]*Environment=\"?" name "=" {
       line=$0
       sub("^[[:space:]]*Environment=\"?" name "=", "", line)
-      sub(/\"[[:space:]]*$/, "", line)
+      sub(/["][[:space:]]*$/, "", line)
       print line
       exit
     }

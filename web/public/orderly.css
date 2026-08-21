@@ -208,9 +208,10 @@ main {
   transition: filter 500ms ease, opacity 500ms ease;
 }
 
+/* The themed slot is an inline <svg> the page draws into — not a replaced
+   element any more, so it needs a display of its own and nothing else. */
 .mascot--themed {
   display: block;
-  object-fit: contain;
 }
 
 .m-body {
@@ -237,9 +238,6 @@ main {
 .m-sclera {
   fill: #fff;
 }
-.m-pupil circle {
-  fill: var(--ink);
-}
 .m-glint {
   fill: #fff;
 }
@@ -248,20 +246,34 @@ main {
   stroke: var(--ink);
   stroke-width: 1.2;
 }
-.m-mouth {
-  fill: none;
-  stroke: var(--ink);
-  stroke-width: 1.2;
-  stroke-linecap: round;
-  transition: d 400ms ease;
-}
+
+/* The eye's MOVEMENT belongs to every mascot; the eye's PAINT belongs only to
+   the default one. A themed variant is inlined with its own artwork and its own
+   colours, so a palette rule reaching it would repaint art that is already
+   right — a white glint would go to ink, a 1.1 stroke would thicken to 1.2.
+   Behaviour below is shared; anything that sets a colour is scoped to the
+   default mascot, which is the one drawn from the theme variables. */
 .m-lid {
-  fill: var(--coral);
   transform: translateY(0px);
   transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .m-pupil {
   transition: transform 320ms cubic-bezier(0.33, 1, 0.68, 1);
+}
+.m-mouth {
+  transition: d 400ms ease;
+}
+.mascot--default .m-pupil circle {
+  fill: var(--ink);
+}
+.mascot--default .m-mouth {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+.mascot--default .m-lid {
+  fill: var(--coral);
 }
 
 /* he is looking at you */

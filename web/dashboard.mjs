@@ -53,6 +53,10 @@ export const SUPPORTED_PROVIDERS = Object.freeze({
   kimi: Object.freeze(["api", "cli"]),
   zai: Object.freeze(["api"]),
   ollama: Object.freeze(["api"]),
+  // Cursor publishes usage only through its cookie-authenticated cursor.com
+  // dashboard, so `web` is the sole strategy that reports it. The desk never
+  // performs that fetch itself — see the probe_source rule below.
+  cursor: Object.freeze(["web"]),
 });
 
 const ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -62,6 +66,34 @@ const WINDOW_NAMES = [
   ["secondary", "weekly"],
   ["tertiary", "tertiary"],
 ];
+// A window label is operator-facing text. Both the live path and the cache path
+// clamp it to the same length so a cached row can never widen the contract.
+const MAX_WINDOW_LABEL = 40;
+// CodexBar ranks its windows primary/secondary/tertiary, and for most
+// subscriptions those ranks really are a session window and a weekly one, so
+// the positional names above are the truth. They are not always: Cursor ranks
+// three month-long scopes, and Kimi Code ranks its weekly request quota ABOVE
+// its 5-hour rate. Calling either of those "session" or "weekly" reports a
+// window that does not exist, on the surface work is routed from. So a
+// positional name survives only while the payload's own windowMinutes agrees
+// with it, and otherwise the window is named from that duration instead.
+const WINDOW_MINUTE_NAMES = new Map([
+  [60, "hourly"],
+  [300, "5-hour"],
+  [1440, "daily"],
+  [10080, "weekly"],
+  [43200, "monthly"],
+  [44640, "monthly"],
+]);
+// headline_window selects a rank, and always has. Once a rank carries a
+// truthful duration name it no longer answers to its positional one, so the
+// name is tried first and the rank it stands for second — which keeps every
+// existing headline number identical while the label beside it becomes right.
+const HEADLINE_RANK = new Map([
+  ["session", 0],
+  ["weekly", 1],
+  ["tertiary", 2],
+]);
 
 export class DashboardConfigError extends Error {}
 export class QuotaProbeError extends Error {}
@@ -103,7 +135,19 @@ export function validateDashboardConfig(raw) {
     // selecting it — the desk has no argv to put it on.
     const localSources = SUPPORTED_PROVIDERS[item.provider];
     const probeSource = item.probe_source ?? (localSources.includes("cli") ? "cli" : localSources[0]);
-    if (probeSource === "web" || probeSource === "auto" || !localSources.includes(probeSource)) {
+    // `web` names a cookie-authenticated provider dashboard. The desk may never
+    // choose it: over codexbar-cli that would put `--source web` on this
+    // process's argv and make the desk itself hold the cookie. Over
+    // codexbar-loopback the strategy is the serve host's to pick and the cookie
+    // stays with that host, so the field documents what happens there rather
+    // than selecting it — which is the only way a web-only provider is
+    // declarable at all, and it stays refused for every local transport.
+    const webDocumentedByLoopback = probeSource === "web" && item.source === "codexbar-loopback";
+    if (
+      (probeSource === "web" && !webDocumentedByLoopback) ||
+      probeSource === "auto" ||
+      !localSources.includes(probeSource)
+    ) {
       throw new DashboardConfigError(`subscription ${item.id} has an invalid probe_source`);
     }
     if (!Array.isArray(item.seat_refs) || item.seat_refs.some((ref) => typeof ref !== "string" || !ref || ref.length > 80)) {
@@ -161,7 +205,9 @@ function remainingFromUsed(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new QuotaProbeError("quota percentage is malformed");
   }
-  return Math.max(0, Math.min(100, 100 - value));
+  // One-decimal rounding: providers report used percentages carrying float
+  // error (20.54 arrives as 20.539999...), which otherwise leaks into the UI.
+  return Math.round(Math.max(0, Math.min(100, 100 - value)) * 10) / 10;
 }
 
 function observedInstant(value, fallback) {
@@ -170,6 +216,96 @@ function observedInstant(value, fallback) {
     throw new QuotaProbeError("quota observation time is malformed");
   }
   return value;
+}
+
+// A scoped window names itself. The label is provider text, so it is trimmed to
+// the same length safeCachedRow already clamps a cached kind to, and it is the
+// only thing an extra window contributes beyond a percentage and a reset.
+function windowLabel(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value !== "string") throw new QuotaProbeError("CodexBar quota window label is malformed");
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, MAX_WINDOW_LABEL) : fallback;
+}
+
+// Beyond the three pinned fields, a provider may report windows that are scoped
+// rather than ranked — the Claude subscription carries a model-scoped weekly
+// beside its session and weekly ones. They arrive as a titled list, so the title
+// is the label and nothing here is written against any particular provider: a
+// provider reporting none produces exactly the row it produced before.
+function extraWindows(raw) {
+  if (raw === null || raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new QuotaProbeError("CodexBar extra quota window schema mismatch");
+  return raw.map((entry, index) => {
+    if (!isRecord(entry) || !isRecord(entry.window)) {
+      throw new QuotaProbeError("CodexBar extra quota window schema mismatch");
+    }
+    return {
+      kind: windowLabel(entry.title, windowLabel(entry.id, `scoped ${index + 1}`)),
+      remaining_pct: remainingFromUsed(entry.window.usedPercent),
+      resets_at: absoluteInstant(entry.window.resetsAt),
+    };
+  });
+}
+
+// A provider can answer successfully and carry no quota window at all: Ollama
+// Cloud publishes no token accounting, and balance-only providers report a
+// balance rather than a window. That is a steady state, not a failed probe, so
+// the row says exactly that and shows no meter. remaining_pct stays null —
+// never 0, which would read as an exhausted subscription. No provider text
+// reaches the row: the detail is fixed, so identity and login state cannot
+// cross the browser boundary through this path either.
+function statusOnlyRow(subscription, observedAt) {
+  return {
+    id: subscription.id,
+    label: subscription.label,
+    provider: subscription.provider,
+    seat_refs: [...subscription.seat_refs],
+    state: "fresh",
+    source: subscription.source,
+    remaining_pct: null,
+    resets_at: null,
+    detail: "Active · no quota windows published",
+    windows: [],
+    observed_at: observedAt,
+    stale_at: new Date(Date.parse(observedAt) + QUOTA_STALE_MS).toISOString(),
+  };
+}
+
+// A duration CodexBar reports but this file has no word for still beats a false
+// one, so it is spelled out rather than dropped.
+function durationWord(minutes) {
+  if (minutes % 1440 === 0) return `${minutes / 1440}-day`;
+  if (minutes % 60 === 0) return `${minutes / 60}-hour`;
+  return `${minutes}-minute`;
+}
+
+// windowMinutes is an optional extra, so a missing or malformed one is not a
+// schema failure: it means the payload makes no duration claim, and the
+// positional name stands exactly as it did before this rule existed.
+function rankedWindowName(positional, minutes) {
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) return positional;
+  if (positional === "session" && minutes < 1440) return positional;
+  if (positional === "weekly" && minutes === 10080) return positional;
+  return WINDOW_MINUTE_NAMES.get(minutes) ?? durationWord(minutes);
+}
+
+// Cursor's three scopes share one duration and one reset, so a duration name
+// alone cannot tell them apart. Rank is the only thing that distinguishes them
+// and it comes from the payload's own field names, so it disambiguates.
+function nameRankedWindows(entries) {
+  const counts = new Map();
+  for (const entry of entries) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1);
+  return entries.map((entry) =>
+    counts.get(entry.name) > 1 ? `${entry.name} (${entry.field})` : entry.name,
+  );
+}
+
+function resolveHeadline(windows, headlineWindow) {
+  const named = windows.find((window) => window.kind === headlineWindow);
+  if (named) return named;
+  const rank = HEADLINE_RANK.get(headlineWindow);
+  return rank === undefined ? null : (windows[rank] ?? null);
 }
 
 function detailFor(windows) {
@@ -185,27 +321,37 @@ function detailFor(windows) {
 }
 
 // Contract pinned to CodexBar v0.49.6 `usage --format json`: provider/source
-// metadata and the primary/secondary/tertiary usage windows. Identity and every
+// metadata, the primary/secondary/tertiary usage windows, and the scoped
+// windows a provider lists in extraRateWindows — a percentage, a reset and a
+// title each, read the same way as the ranked three. Identity and every other
 // provider-specific extra are deliberately ignored.
 export function normalizeCodexbarUsage(raw, subscription, nowMs = Date.now()) {
   if (!isRecord(raw) || raw.provider !== subscription.provider || !isRecord(raw.usage) || raw.error) {
     throw new QuotaProbeError("CodexBar usage schema mismatch");
   }
-  const windows = [];
+  const ranked = [];
   for (const [field, kind] of WINDOW_NAMES) {
     const source = raw.usage[field];
     if (source === null || source === undefined) continue;
     if (!isRecord(source)) throw new QuotaProbeError("CodexBar quota window schema mismatch");
-    windows.push({
-      kind,
+    ranked.push({
+      field,
+      name: windowLabel(rankedWindowName(kind, source.windowMinutes), kind),
       remaining_pct: remainingFromUsed(source.usedPercent),
       resets_at: absoluteInstant(source.resetsAt),
     });
   }
-  if (!windows.length) throw new QuotaProbeError("CodexBar returned no quota windows");
+  const rankedNames = nameRankedWindows(ranked);
+  const windows = ranked.map((entry, index) => ({
+    kind: windowLabel(rankedNames[index], entry.name),
+    remaining_pct: entry.remaining_pct,
+    resets_at: entry.resets_at,
+  }));
+  windows.push(...extraWindows(raw.usage.extraRateWindows));
   const nowIso = new Date(nowMs).toISOString();
   const observedAt = observedInstant(raw.usage.updatedAt, nowIso);
-  const headline = windows.find((window) => window.kind === subscription.headline_window) ?? null;
+  if (!windows.length) return statusOnlyRow(subscription, observedAt);
+  const headline = resolveHeadline(windows, subscription.headline_window);
   return {
     id: subscription.id,
     label: subscription.label,
@@ -250,7 +396,7 @@ export function safeCachedRow(row, subscription, nowMs) {
           const remaining = window.remaining_pct;
           if (remaining !== null && (typeof remaining !== "number" || !Number.isFinite(remaining))) throw new Error("bad pct");
           return {
-            kind: window.kind.slice(0, 40),
+            kind: window.kind.slice(0, MAX_WINDOW_LABEL),
             remaining_pct: remaining === null ? null : Math.max(0, Math.min(100, remaining)),
             resets_at: absoluteInstant(window.resets_at),
           };
@@ -258,7 +404,7 @@ export function safeCachedRow(row, subscription, nowMs) {
       : [];
     const observed = observedInstant(row.observed_at, new Date(nowMs).toISOString());
     const stale = observedInstant(row.stale_at, observed);
-    const headline = windows.find((window) => window.kind === subscription.headline_window) ?? null;
+    const headline = resolveHeadline(windows, subscription.headline_window);
     return {
       id: subscription.id,
       label: subscription.label,

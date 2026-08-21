@@ -1,5 +1,37 @@
 # Release notes
 
+## v0.2.1
+
+### Mascot picker fixed
+
+Picking a desk theme other than Night Desk now shows that theme's own mascot artwork
+throughout the header, live and animated the same way the default always was. Previously
+the swap only ever revealed the default mascot underneath, no matter which theme was
+selected.
+
+### Dashboard meters, upgraded
+
+- **Scoped subscription windows now render.** A provider whose quota is reported as more
+  than one window — for example a headline session cap alongside a separate, longer-scoped
+  cap — now shows every window instead of only the first.
+- **Window labels are duration-truthful.** A provider row previously mislabeled a monthly
+  quota as a session or weekly one; window labels are now derived from the window's actual
+  duration rather than assumed from its position in the response.
+- **Providers with no published quota render as status rows**, never a fabricated percent.
+- **Percent display cleanup.** Meter percentages are rounded to one decimal place, fixing
+  rare floating-point noise (a reading like `79.460000000000001%`) in the raw display.
+
+### Cursor subscription meter
+
+Cursor is now a supported provider in the dashboard's subscription meters, alongside the
+existing set — add it to your `web/dashboard-subscriptions.json` the same way as any other
+provider.
+
+### Installer polish
+
+`web/deploy/install.sh` no longer prints a spurious shell-warning during `--dry-run` on
+some `awk` implementations. No behavior change; the dry-run output is identical.
+
 ## v0.2.0
 
 ### Dashboard

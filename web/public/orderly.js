@@ -2,15 +2,50 @@
 // Everything shown here comes from /api/status, which the server derives by
 // actually asking the gateway. Nothing is assumed.
 
+import { THEMES } from "./themes.js";
+
 const el = (id) => document.getElementById(id);
 const duty = el("duty");
-const mascot = document.querySelector(".mascot");
-const pupil = document.querySelector(".m-pupil");
-const lid = document.querySelector(".m-lid");
-const mouth = document.querySelector(".m-mouth");
 
+// The default mark's own numbers, and the fallbacks for any mascot that does
+// not carry its own. A variant's eye sits at its own size and height, so it
+// states its closed-lid travel and both mouth shapes on the elements themselves.
 const MOUTH_SMILE = "M13.5 23 Q16 25.5 18.5 23";
 const MOUTH_FLAT = "M13.5 23.6 Q16 23.2 18.5 23.6";
+const LID_CLOSE = 11;
+
+// Whichever mascot the theme left visible is the instrument, and its moving
+// parts are looked up again whenever it changes. Binding once at load bound the
+// default mark forever — which is why a chosen variant sat there dead.
+let mascot = null;
+let pupil = null;
+let lid = null;
+let mouth = null;
+
+function visibleMascot() {
+  const all = [...document.querySelectorAll(".mascot")];
+  return all.find((one) => !one.hasAttribute("hidden")) || all[0] || null;
+}
+
+function setMouth(on) {
+  if (!mouth) return;
+  mouth.setAttribute(
+    "d",
+    on
+      ? mouth.getAttribute("data-mouth-smile") || MOUTH_SMILE
+      : mouth.getAttribute("data-mouth-flat") || MOUTH_FLAT,
+  );
+}
+
+function bindMascot(root) {
+  mascot = root || null;
+  pupil = root?.querySelector(".m-pupil") || null;
+  lid = root?.querySelector(".m-lid") || null;
+  mouth = root?.querySelector(".m-mouth") || null;
+  // A mascot bound after the first status answer has to catch up to it.
+  const state = duty?.dataset.state;
+  if (state === "on" || state === "off") setMouth(state === "on");
+}
 
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -35,7 +70,7 @@ function humanDuration(seconds) {
 function render(s) {
   const on = Boolean(s.onDuty);
   duty.dataset.state = on ? "on" : "off";
-  if (mouth) mouth.setAttribute("d", on ? MOUTH_SMILE : MOUTH_FLAT);
+  setMouth(on);
 
   el("plate-text").textContent = on ? "On duty" : "Off post";
 
@@ -107,13 +142,59 @@ async function poll() {
 }
 
 // --- the eye ---------------------------------------------------------------
+//
+// A chosen identity is not a repaint: the variant is inlined here so the page
+// can reach its lid and pupil the way it reaches the default mark's. The file
+// is only ever one the identity manifest names — never an attribute value taken
+// on trust — and the parsed artwork is refused outright if it carries a script,
+// a foreignObject, or an inline handler. Nothing executable arrives this way.
 
-if (!reducedMotion && pupil && lid) {
+const MASCOT_FILES = new Set(THEMES.map((theme) => theme.mascot));
+
+function safeMascotArtwork(text) {
+  const parsed = new DOMParser().parseFromString(text, "image/svg+xml");
+  const root = parsed.documentElement;
+  if (!root || root.nodeName !== "svg" || parsed.querySelector("parsererror")) return null;
+  if (root.querySelector("script, foreignObject")) return null;
+  for (const node of [root, ...root.querySelectorAll("*")]) {
+    for (const attribute of node.attributes) {
+      if (attribute.name.toLowerCase().startsWith("on")) return null;
+      if (attribute.value.replace(/\s/g, "").toLowerCase().startsWith("javascript:")) return null;
+    }
+  }
+  return root;
+}
+
+async function dressThemedMascot() {
+  const slot = document.querySelector("[data-themed-mascot]");
+  if (!slot || slot.hasAttribute("hidden")) return;
+  const source = slot.getAttribute("data-mascot-src");
+  if (!MASCOT_FILES.has(source) || slot.getAttribute("data-mascot-drawn") === source) return;
+  try {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(String(response.status));
+    const artwork = safeMascotArtwork(await response.text());
+    if (!artwork) throw new Error("unusable mascot artwork");
+    slot.replaceChildren(...artwork.childNodes);
+    const box = artwork.getAttribute("viewBox");
+    if (box) slot.setAttribute("viewBox", box);
+    slot.setAttribute("data-mascot-drawn", source);
+  } catch {
+    // Never leave a hole where the status light goes: the default mark ships
+    // inline and is always drawable, so fall back to it and say nothing.
+    slot.toggleAttribute("hidden", true);
+    document.querySelector("[data-default-mascot]")?.toggleAttribute("hidden", false);
+  }
+}
+
+if (!reducedMotion) {
   const blink = () => {
-    if (duty.dataset.state !== "on") return;
-    lid.style.transform = "translateY(11px)";
+    if (!lid || duty.dataset.state !== "on") return;
+    const shut = lid;
+    const travel = Number(shut.getAttribute("data-lid-close")) || LID_CLOSE;
+    shut.style.transform = `translateY(${travel}px)`;
     setTimeout(() => {
-      lid.style.transform = "";
+      shut.style.transform = "";
     }, 130);
   };
   const scheduleBlink = () => {
@@ -131,6 +212,7 @@ if (!reducedMotion && pupil && lid) {
       if (frame) return;
       frame = requestAnimationFrame(() => {
         frame = 0;
+        if (!pupil || !mascot) return;
         const box = mascot.getBoundingClientRect();
         if (!box.width) return;
         const dx = (event.clientX - (box.left + box.width / 2)) / box.width;
@@ -142,6 +224,9 @@ if (!reducedMotion && pupil && lid) {
     { passive: true },
   );
 }
+
+bindMascot(visibleMascot());
+void dressThemedMascot().then(() => bindMascot(visibleMascot()));
 
 // --- the chat --------------------------------------------------------------
 //

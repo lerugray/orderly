@@ -156,12 +156,22 @@ export function applyTheme(value, doc = globalThis.document) {
     const defaultHref = icon.getAttribute("data-default-href") || "/favicon.svg";
     icon.setAttribute("href", theme.id === DEFAULT_THEME ? defaultHref : theme.mascot);
   }
+  // `hidden` is an HTMLElement IDL attribute. The default mascot is an inline
+  // <svg> — an SVGElement, which has no such property — so assigning `.hidden`
+  // there set a stray JS field and never reached the content attribute the
+  // stylesheet hides on, leaving the default mascot painted under every theme.
+  // Toggle the attribute itself: that is the one form both HTML and SVG answer to.
   for (const original of doc.querySelectorAll("[data-default-mascot]")) {
-    original.hidden = theme.id !== DEFAULT_THEME;
+    original.toggleAttribute("hidden", theme.id !== DEFAULT_THEME);
   }
+  // The themed hero slot is an inline <svg> the page draws into, not an <img>
+  // it points at, so the variant's file is NAMED here and fetched by whoever
+  // owns the mascot. `src` would mean nothing on an SVGElement — the same class
+  // of mistake as assigning `.hidden` to one.
   for (const alternate of doc.querySelectorAll("[data-themed-mascot]")) {
-    alternate.hidden = theme.id === DEFAULT_THEME;
-    if (theme.id !== DEFAULT_THEME) alternate.setAttribute("src", theme.mascot);
+    alternate.toggleAttribute("hidden", theme.id === DEFAULT_THEME);
+    if (theme.id !== DEFAULT_THEME) alternate.setAttribute("data-mascot-src", theme.mascot);
+    else alternate.removeAttribute("data-mascot-src");
   }
   for (const meta of doc.querySelectorAll("meta[data-theme-color]")) {
     const original = meta.getAttribute("data-default-content") || "#161E2E";

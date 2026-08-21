@@ -20,7 +20,10 @@ ORDERLY is a self-hosted private AI agent station for one operator who is willin
 - Keeps coordinator-owned reminders and tasks, delivers owner-gated timed reminders, and sends a daily briefing with inbox, calendar, and due items. If one part fails, the briefing identifies the missing part and sends the rest.
 - Researches the web through the gateway's guarded fetch and returns current links without giving the researcher's container network access.
 - Gives only the coordinator persistent memory. The mail and research agents remain memoryless. A voice profile can be built from sent mail, reviewed by the operator, and installed separately as an immutable drafting rule.
+- Shows subscription usage on the dashboard: meters read from a loopback CodexBar service, one bar per rate window, labeled with each window's real duration. A provider's scoped caps render as their own bars, and a provider that publishes no quota gets a plain status row rather than an invented number. The desk holds no provider credential to do this.
 - Includes an orchestrator desk that turns a request into a bounded coding brief, dispatches it to an external agent lane, watches terminal state, and reports the result. ORDERLY does not edit, commit, merge, or verify that code for the operator.
+
+Two ratified specifications in [`docs/`](docs/) set the next direction: named persistent agents, created and chatted with on the desk, each optionally reachable through its own attached Telegram bot; and local-model seats, which let a small model on the operator's own hardware hold the chat and research tiers while the configuration refuses work the model cannot do.
 
 ## Security posture
 

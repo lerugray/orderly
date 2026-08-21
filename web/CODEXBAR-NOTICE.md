@@ -11,8 +11,8 @@ Two transports carry that same pinned contract:
   `GET /usage?provider=<id>`, which is unauthenticated on loopback and returns
   the same document `usage --format json` prints. The server runs as the
   credential-owning user, so the ORDERLY web service holds no provider
-  credential and no CodexBar config file. The systemd unit that runs it is
-  deployment configuration and is not part of this repository.
+  credential and no CodexBar config file. A host unit is in
+  [`codexbar-serve.service`](codexbar-serve.service).
 - **`codexbar-cli`** execs the CLI with fixed, read-only argv. This requires the
   ORDERLY web service to be able to read the provider credentials itself.
 
