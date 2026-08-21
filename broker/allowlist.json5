@@ -1,0 +1,59 @@
+{
+  // SECURITY BOUNDARY — treat changes to this file like changes to sudoers.
+  //
+  // The broker accepts only repo_id and preset_id over HTTP. It looks up every
+  // path and every argv entry here. A brief may contain text that resembles a
+  // path, flag, model name, shell substitution or instruction; none of it is
+  // interpolated here, and none of it becomes a command-line argument.
+  //
+  // Keep sources on the Linux/WSL filesystem. Never point a repo entry at a
+  // Windows-mounted, Mac-synced, or operator working tree. The broker resolves
+  // the named branch to a committed SHA, then clones a clean detached checkout
+  // under ~/.orderly/lanes/<lane-id>/worktree.
+  "repos": [
+    {
+      // Fixture only: replace this host-owned path during deployment with the
+      // dedicated non-sensitive fixture repository used for qualification.
+      "repo_id": "fixture-sandbox",
+      "url_or_path": "/srv/orderly/fixtures/fixture-sandbox",
+      "branch": "main",
+    },
+  ],
+
+  "presets": [
+    {
+      // Every entry is a literal argv element. Do not add placeholders such as
+      // {brief}, {workdir}, {model} or ${ENV}; the loader has no substitution
+      // feature by design. cwd is set by the broker, timeout is enforced by
+      // lane-run.sh, and the final fixed "-" tells codex to read the brief from
+      // stdin (which the broker feeds from its mode-0600 brief.txt file).
+      "preset_id": "codex-default",
+      "cmd_template": [
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--strict-config",
+        "--model",
+        "gpt-5.6-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "agents.enabled=false",
+        "--config",
+        "web_search=\"disabled\"",
+        "--config",
+        "shell_environment_policy.inherit=\"none\"",
+        "--sandbox",
+        "workspace-write",
+        "--color",
+        "never",
+        "-",
+      ],
+      // This duplicates the fixed argv intentionally: validation rejects any
+      // preset whose declared sandbox is not workspace-write.
+      "sandbox": "workspace-write",
+      "timeout_max_s": 7200,
+    },
+  ],
+}

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Orchestration · ORDERLY</title>
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/orderly.css" />
+    <link rel="stylesheet" href="/orchestration.css" />
+  </head>
+  <body>
+    <a class="skip" href="#board">Skip to lane board</a>
+
+    <header class="bar">
+      <div class="bar__brand">
+        <img class="bar__mark" src="/mark.svg" alt="" width="26" height="26" />
+        <span class="wordmark">Orderly</span>
+      </div>
+      <nav class="nav" aria-label="Sections">
+        <a class="nav__link" href="/">Station</a>
+        <a class="nav__link is-here" href="/orchestration" aria-current="page">Orchestration</a>
+        <a class="nav__link" href="/settings">Settings</a>
+      </nav>
+      <p class="bar__where">Operator desk</p>
+    </header>
+
+    <main class="orchestration">
+      <section class="orchestration__head">
+        <div>
+          <p class="eyebrow">One lane · operator gated</p>
+          <h1 class="orchestration__title">Orchestration desk</h1>
+          <p class="orchestration__sub">
+            Prepare a typed proposal, inspect its broker-owned digest, then confirm it. Lane
+            output is evidence for your inspection, not a verdict.
+          </p>
+        </div>
+        <p class="broker-state" id="broker-state" data-state="checking" role="status">
+          Checking broker…
+        </p>
+      </section>
+
+      <section class="consult" aria-labelledby="consult-title">
+        <form id="consult-form">
+          <h2 class="label" id="consult-title">Ask ORDERLY</h2>
+          <p class="dispatch__note">
+            The qualified episodic seat sees the allowlist and current broker-owned lane state.
+            This is consultation only; use the operator token below, then review the normal digest.
+          </p>
+          <label class="desk-field">
+            <span>Operator ask</span>
+            <textarea id="seat-ask" rows="4" maxlength="12000" required placeholder="What should the next bounded lane do?"></textarea>
+          </label>
+          <div class="dispatch__actions">
+            <button class="cta dispatch__button" id="consult-button" type="submit">Ask ORDERLY</button>
+            <p class="dispatch__message" id="consult-message" role="status"></p>
+          </div>
+        </form>
+        <section class="seat-proposal" id="seat-proposal" hidden>
+          <h3 class="seat-proposal__title">PROPOSAL — nothing runs until you confirm a digest</h3>
+          <pre class="digest" id="seat-proposal-json"></pre>
+          <div class="review__actions">
+            <button class="ghost" id="prefill-dispatch" type="button" hidden>Prefill dispatch form</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="desk-grid">
+        <form class="dispatch" id="dispatch-form">
+          <h2 class="label">Prepare a dispatch</h2>
+          <p class="dispatch__note">
+            The broker resolves the pinned base and accepts allowlisted names only. Requesting a
+            proposal does not start a lane.
+          </p>
+          <div class="dispatch__fields">
+            <label class="desk-field">
+              <span>Repository</span>
+              <select id="repo-id" name="repo_id" required disabled>
+                <option value="">Waiting for broker…</option>
+              </select>
+            </label>
+            <label class="desk-field">
+              <span>Lane preset</span>
+              <select id="preset-id" name="preset_id" required disabled>
+                <option value="">Waiting for broker…</option>
+              </select>
+            </label>
+            <label class="desk-field desk-field--wide">
+              <span>Brief</span>
+              <textarea id="brief-text" name="brief_text" rows="7" maxlength="12000" required placeholder="Bounded work for one disposable lane…"></textarea>
+            </label>
+            <label class="desk-field">
+              <span>Timeout · seconds</span>
+              <input id="timeout-s" name="timeout_s" type="number" min="60" step="60" value="1800" required />
+            </label>
+            <label class="desk-field">
+              <span>Operator token</span>
+              <input id="operator-token" type="password" autocomplete="off" spellcheck="false" required />
+              <small>Held in this tab's memory only. Required on every action.</small>
+            </label>
+          </div>
+          <div class="dispatch__actions">
+            <button class="cta dispatch__button" id="propose-button" type="submit" disabled>Propose</button>
+            <p class="dispatch__message" id="dispatch-message" role="status"></p>
+          </div>
+        </form>
+
+        <section class="review" id="review" aria-labelledby="review-title" hidden>
+          <h2 class="label" id="review-title">Operator review</h2>
+          <p class="review__warning">
+            This exact broker digest is the action boundary. Compare every field before confirming.
+          </p>
+          <pre class="digest" id="action-digest"></pre>
+          <div class="review__actions">
+            <button class="cta review__confirm" id="confirm-button" type="button">Confirm dispatch</button>
+            <button class="ghost" id="discard-proposal" type="button">Discard proposal</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="block" id="board">
+        <div class="board__head">
+          <h2 class="label">Lane board</h2>
+          <p class="board__stamp" id="board-stamp">not read yet</p>
+        </div>
+        <p class="board__note" id="board-note">Reading broker-owned lane state.</p>
+        <div class="lanes" id="lanes"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>Workers cannot commit, merge, push, publish, or declare their own work accepted.</p>
+    </footer>
+
+    <script src="/orchestration.js" type="module"></script>
+  </body>
+</html>

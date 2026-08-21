@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>ORDERLY</title>
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/orderly.css" />
+  </head>
+  <body>
+    <a class="skip" href="#duty">Skip to status</a>
+
+    <header class="bar">
+      <div class="bar__brand">
+        <img class="bar__mark" src="/mark.svg" alt="" width="26" height="26" />
+        <span class="wordmark">Orderly</span>
+      </div>
+      <nav class="nav" aria-label="Sections">
+        <a class="nav__link is-here" href="/" aria-current="page">Station</a>
+        <a class="nav__link" href="/orchestration">Orchestration</a>
+        <a class="nav__link" href="/settings">Settings</a>
+      </nav>
+      <p class="bar__where" id="bar-where">Private station</p>
+    </header>
+
+    <main>
+      <!-- The duty card: the mark is the instrument. Its state is server truth. -->
+      <section class="duty" id="duty" data-state="checking" aria-live="polite">
+        <div class="duty__figure">
+          <svg
+            class="mascot"
+            viewBox="0 0 32 32"
+            role="img"
+            aria-label="The ORDERLY mascot"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <defs>
+              <clipPath id="eyeClip"><circle cx="16" cy="17.5" r="5.5" /></clipPath>
+            </defs>
+            <circle class="m-body" cx="16" cy="18.5" r="11.5" />
+            <path class="m-brim" d="M8.5 10.5 Q16 6.5 23.5 10.5" />
+            <path class="m-cap" d="M9.5 10.5 L9.5 6.5 Q16 4 22.5 6.5 L22.5 10.5" />
+            <circle class="m-blush" cx="11" cy="20.5" r="1.2" />
+            <circle class="m-blush" cx="21" cy="20.5" r="1.2" />
+            <circle class="m-sclera" cx="16" cy="17.5" r="5.5" />
+            <g clip-path="url(#eyeClip)">
+              <g class="m-pupil">
+                <circle cx="16" cy="17.5" r="2.6" />
+                <circle class="m-glint" cx="17.5" cy="16" r="1.1" />
+              </g>
+              <rect class="m-lid" x="9" y="0" width="14" height="12" />
+            </g>
+            <circle class="m-ring" cx="16" cy="17.5" r="5.5" />
+            <path class="m-mouth" d="M13.5 23 Q16 25.5 18.5 23" />
+          </svg>
+        </div>
+
+        <div class="duty__body">
+          <p class="plate"><span class="plate__lamp" aria-hidden="true"></span><span id="plate-text">Checking</span></p>
+          <h1 class="duty__line" id="duty-line">Asking the gateway.</h1>
+          <p class="duty__sub" id="duty-sub">One moment.</p>
+          <a class="cta" id="console-link" href="http://127.0.0.1:18789/openclaw/">
+            Open the console
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </a>
+        </div>
+      </section>
+
+      <!-- The approval queue. Two kinds of card, and they are opposites.
+           A DRAFT: approving records that it was read and kept, and sends
+           nothing, because nothing on this station can send.
+           A CALENDAR PROPOSAL: approving MAKES THE CHANGE, there and then.
+           The cards are coloured and worded apart on purpose — the same button
+           means two different things and the page has to say which. -->
+      <section class="block" id="queue">
+        <div class="day__head">
+          <h2 class="label">Waiting on you</h2>
+          <p class="day__when" id="queue-when">reading</p>
+        </div>
+        <p class="day__note" id="queue-note">
+          Work he has finished, held here until you say. <strong>A draft is kept, never
+          sent</strong> — sending is switched off underneath, so the last move is yours in
+          Gmail. <strong>A calendar proposal is different: approving it creates or changes
+          the event immediately.</strong> He can ask; only you can do it.
+        </p>
+        <div class="queue__stack" id="queue-stack"></div>
+        <ul class="queue__recent" id="queue-recent"></ul>
+      </section>
+
+      <!-- The day. The mail agent already reads the calendar, read-only; this
+           gives that a standing surface. It is never asked for automatically —
+           the answer costs a model call, so the operator asks. -->
+      <section class="block" id="day">
+        <div class="day__head">
+          <h2 class="label">The day</h2>
+          <p class="day__when" id="day-when">not checked yet</p>
+          <span class="day__act">
+            <button class="ghost" type="button" id="day-check">Check the calendar</button>
+          </span>
+        </div>
+        <p class="day__note" id="day-note">
+          He'll read what's scheduled for the next seven days and lay it out here. Read only —
+          he can see the calendar, he cannot write to it.
+        </p>
+        <ul class="day__list" id="day-list" hidden></ul>
+      </section>
+
+      <!-- Reminders. A window onto the coordinator's own list, read from the
+           file he writes. No model call, and no way to change it from here:
+           scheduling a reminder is owner-gated at the gateway and this page is
+           deliberately not the owner. Ask him on Telegram to add or tick one. -->
+      <section class="block" id="due">
+        <div class="day__head">
+          <h2 class="label">Reminders</h2>
+          <p class="day__when" id="due-when">reading</p>
+        </div>
+        <p class="day__note" id="due-note">His list, as it stands.</p>
+        <ul class="day__list" id="due-list" hidden></ul>
+      </section>
+
+      <!-- The chat. Messages go to this page's own server, which holds the
+           gateway credential; the browser never sees one. -->
+      <section class="block" id="talk">
+        <h2 class="label">Talk to him</h2>
+
+        <div class="desks" role="radiogroup" aria-label="Which desk to ask">
+          <button class="desks__opt is-on" type="button" role="radio" aria-checked="true" data-desk="coordinator">
+            Coordinator
+          </button>
+          <button class="desks__opt" type="button" role="radio" aria-checked="false" data-desk="mail">
+            Mail desk
+          </button>
+          <p class="desks__note" id="desk-note">
+            The coordinator handles anything and hands the work to a specialist — the mail
+            agent, or the researcher for anything on the web. He answers straight away to say
+            he's asked, and carries the result back here when you ask again.
+          </p>
+        </div>
+
+        <div class="talk">
+          <div class="talk__main">
+            <!-- Shown only while an archived thread is open. Reading is not talking. -->
+            <div class="reading" id="reading" hidden>
+              <p class="reading__text" id="reading-text">Reading an archived thread.</p>
+              <span class="reading__acts">
+                <button class="ghost" type="button" id="reading-restore">Restore it</button>
+                <button class="ghost" type="button" id="reading-close">Back to the live thread</button>
+              </span>
+            </div>
+
+            <div class="thread" id="thread" role="log" aria-live="polite" aria-label="Conversation">
+              <p class="thread__empty" id="thread-empty">
+                Nothing said yet. Ask him something below.
+              </p>
+            </div>
+
+            <form class="composer" id="composer">
+              <label class="sr-only" for="ask">Message</label>
+              <textarea
+                id="ask"
+                name="ask"
+                rows="1"
+                autocomplete="off"
+                placeholder="Ask him something…"
+              ></textarea>
+              <button class="send" id="send" type="submit">
+                <span id="send-text">Send</span>
+              </button>
+            </form>
+            <p class="composer__hint" id="composer-hint">
+              Enter sends · Shift and Enter for a new line
+            </p>
+
+            <p class="starters">
+              <span class="starters__label">Try asking</span>
+              <button class="starter" type="button" data-desk="mail">What came in overnight?</button>
+              <button class="starter" type="button" data-desk="mail">What's on this week?</button>
+              <button class="starter" type="button" data-desk="coordinator">Find me three links about self-hosting a Telegram bot</button>
+            </p>
+
+            <!-- Threads live in this browser, not on the station. Clearing archives
+                 first, so nothing said is thrown away without being asked for. -->
+            <div class="threadbar">
+              <button class="ghost" type="button" id="thread-archive">Archive &amp; clear</button>
+              <button class="ghost" type="button" id="archive-toggle" aria-expanded="false" aria-controls="archive">
+                Archive
+              </button>
+              <p class="threadbar__note" id="threadbar-note"></p>
+            </div>
+
+            <section class="archive" id="archive" hidden aria-label="Archived threads">
+              <p class="archive__note" id="archive-note"></p>
+              <ul class="archive__list" id="archive-list"></ul>
+            </section>
+          </div>
+
+          <!-- Results the agents actually return — inbox summaries, calendar
+               readouts, drafts — stand apart from the talking. -->
+          <aside class="rail" aria-label="Results">
+            <p class="rail__label">What came back</p>
+            <div class="rail__stack" id="rail-stack"></div>
+            <p class="rail__empty" id="rail-empty">
+              Inbox summaries, calendar readouts and drafts land here as cards, apart from the
+              conversation.
+            </p>
+          </aside>
+        </div>
+      </section>
+
+      <section class="block">
+        <h2 class="label">What he handles</h2>
+        <p class="block__intro">
+          Each duty carries the privilege it actually runs at. Where a scope says read only,
+          sending is switched off underneath it, not just discouraged in the prompt.
+        </p>
+        <ul class="duties">
+          <li class="duty-row">
+            <span class="duty-row__name">Mail triage</span>
+            <span class="duty-row__what">Reads both inboxes — personal and work — summarises what came in, says what needs you, and always names which account it came to.</span>
+            <span class="chip chip--read">Read only</span>
+          </li>
+          <li class="duty-row">
+            <span class="duty-row__name">Reply drafts</span>
+            <span class="duty-row__what">Writes the reply into the drafts of whichever account it answers. You read it and press send.</span>
+            <span class="chip chip--draft">Drafts only</span>
+          </li>
+          <li class="duty-row">
+            <span class="duty-row__name">Approval queue</span>
+            <span class="duty-row__what">Everything he finishes waits here. A draft: approving records that you read it and kept it, and you press send in Gmail. A calendar proposal: approving is the act — the event appears when you click, and not before.</span>
+            <span class="chip chip--draft">You decide</span>
+          </li>
+          <li class="duty-row">
+            <span class="duty-row__name">Mail routines</span>
+            <span class="duty-row__what">Standing rules you write — when mail matching one arrives, he tells you, drafts a reply, or both. Nothing else: there is no rule that can file, delete or forward, because the scopes for that don't exist here.</span>
+            <span class="chip chip--draft">Tell or draft</span>
+          </li>
+          <li class="duty-row">
+            <span class="duty-row__name">Calendar</span>
+            <span class="duty-row__what">Reads what's scheduled and answers questions about the week. He can also <em>propose</em> an event — new, or a change to one — and it waits on the queue above. Approving is what creates it; he holds no path to your calendar himself, and there is no delete, at any layer, for anything.</span>
+            <span class="chip chip--act">You approve writes</span>
+          </li>
+          <li class="duty-row">
+            <span class="duty-row__name">Standing checks</span>
+            <span class="duty-row__what">Runs on a schedule you set and reports back through Telegram.</span>
+            <span class="chip chip--read">Owner sets it</span>
+          </li>
+          <li class="duty-row">
+            <span class="duty-row__name">Research</span>
+            <span class="duty-row__what">Searches the web and reads pages, then comes back with the answer and the real links. Keyless search, no account, no tracker.</span>
+            <span class="chip chip--read">Read only</span>
+          </li>
+          <li class="duty-row">
+            <span class="duty-row__name">Remembering</span>
+            <span class="duty-row__what">Keeps what you tell him — preferences, standing instructions, facts about your setup — in notes on the station, and has them at the start of the next conversation. He writes to those notes and nothing else. Never credentials, and never what an email or a web page said about you.</span>
+            <span class="chip chip--draft">His notes only</span>
+          </li>
+          <li class="duty-row duty-row--off">
+            <span class="duty-row__name">Sending mail</span>
+            <span class="duty-row__what">Blocked in the container's environment, not just in the prompt — for every account, because the block binds the process rather than the mailbox.</span>
+            <span class="chip chip--off">Off</span>
+          </li>
+        </ul>
+      </section>
+
+      <section class="block">
+        <h2 class="label">Other ways to reach him</h2>
+        <div class="cards">
+          <article class="card">
+            <h3 class="card__title">Telegram</h3>
+            <p class="card__text">
+              The everyday channel. Message the bot and the coordinator picks it up, same as
+              anything typed into the console.
+            </p>
+            <p class="card__meta" id="telegram-meta">—</p>
+          </article>
+          <article class="card">
+            <h3 class="card__title">Console</h3>
+            <p class="card__text">
+              The full panel: chat, transcripts, scheduled tasks, tool policy and logs. Reach for
+              it when you want to see the plumbing rather than talk to it.
+            </p>
+            <p class="card__meta"><a class="card__link" id="console-link-2" href="http://127.0.0.1:18789/openclaw/">Open the console</a></p>
+          </article>
+        </div>
+      </section>
+
+      <section class="block">
+        <h2 class="label">Standing orders</h2>
+        <ul class="orders">
+          <li class="order">
+            <span class="order__rule" aria-hidden="true"></span>
+            <p><strong>He reads your mail. He cannot send it.</strong> Inbound email is untrusted text, so the ceiling is a draft. You send it yourself from Gmail.</p>
+          </li>
+          <li class="order">
+            <span class="order__rule" aria-hidden="true"></span>
+            <p><strong>Every tool runs in a sealed container.</strong> No network, no privileges, and a read-only disk with one exception: the coordinator can write his own notes, in his own folder, and nowhere else. His standing orders sit in that same folder owned by the host — he can read them and cannot touch them. Only the mail agent gets an outside line, and it gets it alone.</p>
+          </li>
+          <li class="order">
+            <span class="order__rule" aria-hidden="true"></span>
+            <p><strong>One operator, one box, no public door.</strong> The gateway answers on loopback and reaches you over your own network. Nothing is published to the internet.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="block">
+        <h2 class="label">The station</h2>
+        <dl class="readout" id="readout">
+          <div class="readout__row"><dt>Gateway</dt><dd id="r-gateway">—</dd></div>
+          <div class="readout__row"><dt>On duty for</dt><dd id="r-uptime">—</dd></div>
+          <div class="readout__row"><dt>Model</dt><dd id="r-model">—</dd></div>
+          <div class="readout__row"><dt>Agents</dt><dd id="r-agents">—</dd></div>
+          <div class="readout__row"><dt>Reply time</dt><dd id="r-latency">—</dd></div>
+          <div class="readout__row"><dt>Last checked</dt><dd id="r-checked">—</dd></div>
+        </dl>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>ORDERLY runs on hardware you own, on subscriptions you already pay for.</p>
+    </footer>
+
+    <script src="/orderly.js" type="module"></script>
+  </body>
+</html>

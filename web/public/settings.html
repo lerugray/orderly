@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Settings · ORDERLY</title>
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#161E2E" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/orderly.css" />
+  </head>
+  <body>
+    <a class="skip" href="#panels">Skip to settings</a>
+
+    <header class="bar">
+      <div class="bar__brand">
+        <img class="bar__mark" src="/mark.svg" alt="" width="26" height="26" />
+        <span class="wordmark">Orderly</span>
+      </div>
+      <nav class="nav" aria-label="Sections">
+        <a class="nav__link" href="/">Station</a>
+        <a class="nav__link" href="/orchestration">Orchestration</a>
+        <a class="nav__link is-here" href="/settings" aria-current="page">Settings</a>
+      </nav>
+      <p class="bar__where" id="bar-where">Private station</p>
+    </header>
+
+    <main class="page">
+      <section class="head">
+        <h1 class="head__title">Settings</h1>
+        <p class="head__sub">
+          This page changes <strong>which models he thinks with</strong>, and nothing else. The
+          sandbox ruling, the tool denies, the channel allowlist and every credential are shown
+          here as they stand but cannot be edited from a browser — the server refuses the write,
+          by name, if a change would touch them.
+        </p>
+        <p class="head__state" id="head-state" data-state="loading">Reading the station's config…</p>
+      </section>
+
+      <div class="layout" id="panels">
+        <nav class="panelnav" aria-label="Settings sections">
+          <button class="panelnav__opt is-on" type="button" data-panel="models">
+            <span class="panelnav__name">Models</span>
+            <span class="panelnav__note">What he thinks with</span>
+          </button>
+          <button class="panelnav__opt" type="button" data-panel="providers">
+            <span class="panelnav__name">Providers</span>
+            <span class="panelnav__note">Where models come from</span>
+          </button>
+          <button class="panelnav__opt" type="button" data-panel="duty">
+            <span class="panelnav__name">Duty</span>
+            <span class="panelnav__note">What he's allowed to do</span>
+          </button>
+        </nav>
+
+        <div class="panels">
+          <!-- ---------------- models ---------------- -->
+          <section class="panel is-on" id="panel-models" aria-label="Models">
+            <div class="fieldset">
+              <h2 class="label">The station's models</h2>
+              <p class="fieldset__intro">
+                Every agent uses these unless it is given its own below. Fallbacks are tried, in
+                order, when the main model won't answer.
+              </p>
+              <div class="fields" id="defaults-fields"></div>
+            </div>
+
+            <div class="fieldset">
+              <h2 class="label">Per agent</h2>
+              <p class="fieldset__intro">
+                Give one agent a different model without moving the rest. An agent set to
+                <em>the station default</em> follows the setting above.
+              </p>
+              <div class="fields" id="agent-fields"></div>
+            </div>
+          </section>
+
+          <!-- ---------------- providers ---------------- -->
+          <section class="panel" id="panel-providers" aria-label="Providers">
+            <div class="fieldset">
+              <h2 class="label">Configured here</h2>
+              <p class="fieldset__intro">
+                What this station can currently reach. Model tags are editable because catalogues
+                move — a provider retires a tag and the station needs the new one. The credential
+                is named, never shown: its value lives in a file on the host and never enters this
+                page.
+              </p>
+              <div id="provider-cards"></div>
+            </div>
+
+            <div class="fieldset">
+              <h2 class="label">Adding another</h2>
+              <p class="fieldset__intro" id="catalog-intro">
+                Providers this build of OpenClaw supports, and the environment variable each one
+                wants.
+              </p>
+              <div class="note note--hard">
+                <p>
+                  <strong>Credentials are not entered here, and never will be.</strong> To add a
+                  provider, put its key in <code id="env-path">~/.openclaw/.env</code> on the host
+                  and add the provider to the config there. This page shows you the variable
+                  <em>name</em> and whether that name is already set. It cannot read, accept or
+                  store a value.
+                </p>
+              </div>
+              <div class="catalog" id="catalog"></div>
+              <p class="catalog__foot" id="catalog-foot"></p>
+            </div>
+          </section>
+
+          <!-- ---------------- duty ---------------- -->
+          <section class="panel" id="panel-duty" aria-label="Duty">
+            <div class="fieldset">
+              <h2 class="label">Standing ruling</h2>
+              <div class="readout" id="duty-ruling"></div>
+            </div>
+            <div class="fieldset">
+              <h2 class="label">Agents</h2>
+              <div class="agents" id="duty-agents"></div>
+            </div>
+            <div class="fieldset">
+              <h2 class="label">Doors</h2>
+              <p class="fieldset__intro">
+                Which endpoints answer, and on what. Everything binds loopback; nothing is
+                published.
+              </p>
+              <div class="readout" id="duty-doors"></div>
+            </div>
+            <div class="fieldset">
+              <h2 class="label">Channels</h2>
+              <div class="readout" id="duty-channels"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <!-- The save bar only exists while there is something to save. -->
+    <div class="savebar" id="savebar" hidden>
+      <p class="savebar__count" id="savebar-count">1 change</p>
+      <div class="savebar__acts">
+        <button class="ghost" type="button" id="discard">Discard</button>
+        <button class="cta cta--solid" type="button" id="review">Review and save</button>
+      </div>
+    </div>
+
+    <dialog class="confirm" id="confirm">
+      <form method="dialog" class="confirm__form">
+        <h2 class="confirm__title">Save these changes?</h2>
+        <ul class="confirm__list" id="confirm-list"></ul>
+        <div class="note note--warn">
+          <p>
+            <strong>This restarts the gateway.</strong> He'll be off his post for about ten
+            seconds while it comes back — Telegram and any running task included. The current
+            config is backed up beside itself first.
+          </p>
+        </div>
+        <div class="confirm__acts">
+          <button class="ghost" type="submit" value="cancel">Cancel</button>
+          <button class="cta cta--solid" type="button" id="do-save">Save and restart</button>
+        </div>
+        <div class="progress" id="progress" hidden>
+          <p class="progress__line" id="progress-line">Writing the config…</p>
+          <div class="progress__track"><span class="progress__bar" id="progress-bar"></span></div>
+        </div>
+      </form>
+    </dialog>
+
+    <footer class="foot">
+      <p>ORDERLY runs on hardware you own, on subscriptions you already pay for.</p>
+    </footer>
+
+    <script src="/settings.js" type="module"></script>
+  </body>
+</html>

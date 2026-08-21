@@ -1,0 +1,9 @@
+# Local runtime state — never committed.
+node_modules/
+*.log
+.DS_Store
+
+# Anything derived from the operator's real correspondence stays out of this repo.
+# The voice-profile build writes its corpus outside the repo entirely, and the draft
+# dossier carries the operator's own greetings and sign-offs verbatim.
+docs/voice-drafts/
