@@ -1,27 +1,9 @@
-> **DRAFT for the v0.4 arc — NOT YET RATIFIED.** Produced by Sakana Fugu (`fugu`, base tier,
-> chat API, 40,000-token budget; completed clean in 271s using 12,727 completion tokens
-> [8,110 reasoning] — not truncated, ends at its own requested "open questions" section)
-> from a spec-only ask (external-reasoner-discipline: numbered required sections, explicit
-> anti-goals, no code). The ask was grounded in this repo's own precedent for exactly this
-> shape of feature — `docs/VOICE-PROFILE.md` (the installed operator-authored law-file
-> pattern for mail voice) — plus the coordinator's full standing orders
-> (`config/agents/coordinator-AGENTS.md`), the two live voice-orders append blocks
-> (`config/agents/voice-orders.{coordinator,mail}.md`), the README's security-posture and
-> status sections, the `web/settings.mjs` typed-envelope / path-allowlist / invariants write
-> discipline (the engine-definition class's Gate 2 is the newest live instance of that
-> pattern), and both named-agent system-preamble construction paths in `web/agents.mjs`
-> (the mounted, read-only `STANDING_ORDERS` template) and `web/server.mjs`
-> (`agentSystemPrompt`, the memoryless inline builder). This is a design document, not an
-> implementation plan — nothing below has been reviewed or approved by the operator yet.
->
-> Operator framing behind the ask (verbatim flagship example): *"don't end every response
-> with a question unless one is genuinely needed."* The operator wants a claude.ai-preferences-
-> style surface where they leave plain instructions tuning how the bot(s) talk to them — never
-> a new capability, never a new safety boundary.
-
 # ORDERLY reply-style preferences — specification v0.4
 
-**Status: proposed.**
+> **RATIFIED AS BUILD DIRECTION 2026-08-21.** Public release copy. The operator
+> ratified this specification; the storage compatibility ruling is incorporated below.
+
+**Status: ratified, with the storage compatibility ruling above.**
 
 Reply-style preferences are operator-authored, session-durable instructions governing how ORDERLY speaks to the operator. They are a style layer only. They do not add tools, credentials, network access, delegation, memory, or write authority.
 
@@ -38,21 +20,21 @@ This is a **prompt-layer control**, not a sandbox or capability boundary. It res
 
 ### 1.2 Authoritative storage
 
-1. The authoritative record SHALL live in the gateway's existing `openclaw.json`, under a station-owned `orderly.replyStyle` subtree.
+1. The authoritative record SHALL live in the station-owned `~/.orderly/reply-style.json` sidecar. It SHALL NOT add a custom key to OpenClaw's strictly validated `openclaw.json`.
 2. The subtree SHALL contain:
    1. station-wide free text;
    2. station-wide enabled preset identifiers;
    3. optional per-agent free text; and
    4. optional per-agent preset overrides.
 3. Free text and preset state SHALL remain data within that narrow subtree. No preference field SHALL contain or alias a tool policy, approval policy, credential reference, channel, binding, sandbox setting, workspace path, model provider, or delegation setting.
-4. The prompt assembler SHALL read the preferences host-side. Agents SHALL receive only the rendered preference block and SHALL NOT be given access to `openclaw.json`.
+4. The prompt assembler SHALL read the preferences host-side. Agents SHALL receive only the rendered preference block and SHALL NOT be given access to the sidecar or `openclaw.json`.
 
-This uses the station's existing typed, reviewed, atomic configuration-write mechanism rather than introducing a writable preference file in an agent workspace.
+This uses the station's existing typed, reviewed, atomic configuration-write discipline. The sidecar is host state, not a writable preference file in an agent workspace.
 
 ### 1.3 Ownership and permissions
 
-1. The preference subtree SHALL inherit the existing ownership, group, permissions, backup treatment, and write path of `openclaw.json`.
-2. `openclaw.json` MUST remain unavailable inside every agent sandbox.
+1. The preference record SHALL be mode `0600`, live under the front-door service identity's private state directory, and receive backup plus atomic-replacement treatment.
+2. Both the preference record and `openclaw.json` MUST remain unavailable inside every agent sandbox.
 3. Preferences SHALL **not** receive the same root-owned, mode-`0444`, immutable treatment as `VOICE.md`.
 4. That lighter treatment is deliberate:
    1. `VOICE.md` is a law file placed where drafting agents can read it and therefore must be defended from those agents rewriting or deleting it.
@@ -111,7 +93,7 @@ The panel SHALL preserve line breaks in the operator's text. It MUST NOT interpr
 
 ### 2.2 Typed write envelope
 
-1. The existing settings envelope SHALL gain one top-level key: `replyStyle`.
+1. The settings endpoint SHALL accept one separate top-level envelope: `replyStyle`. It SHALL refuse a mixed model-and-style save so each authoritative file remains atomic.
 2. That key SHALL be the only browser-expressible route to the preference subtree.
 3. Its accepted fields SHALL be limited to:
    1. station instructions;
@@ -173,7 +155,7 @@ The existing write sequence is sufficient and SHALL remain unchanged:
 8. filesystem sync; and
 9. atomic rename.
 
-This feature MUST NOT weaken, bypass, or special-case any of those stages.
+This feature MUST NOT weaken, skip, or special-case any of those stages.
 
 A successful change SHALL take effect at the next system-prompt assembly. If an upstream session cannot accept a replaced system preamble, the desk SHALL begin a fresh upstream session or state clearly that the change applies from the next session. It MUST NOT claim that a cached prompt changed when it did not.
 
@@ -330,9 +312,9 @@ V1 is explicitly not:
 11. **An inbound-content promotion mechanism.** Email, web content, routine matches, memory, and specialist reports never become preference instructions automatically.
 12. **A formatting prohibition that defeats the task.** Accuracy, required clarification, and genuinely task-essential output structure remain governed by higher instructions.
 
-## Open questions for the operator
+## Operator rulings applied in v0.4
 
-1. Should per-agent overrides be visible in the v1 UI, or should v1 ship station-wide controls while retaining the per-agent storage and precedence design?
-2. Should "Questions only when needed" start enabled, or should every preset initially be off?
-3. Should the preferences apply to autonomous operator-facing messages such as the morning briefing and reminders, subject to their higher standing formats, or only to interactive replies?
-4. When a preference changes during an active upstream session, is starting a fresh model session acceptable if that is required to replace the system preamble?
+1. Per-agent overrides are visible in the v1 UI, with an explicit inheritance state.
+2. Every preset starts off. Existing installations therefore retain their prior reply behavior until the operator opts in.
+3. V1 prompt assembly covers interactive web replies. Autonomous briefings, reminders, and direct gateway-channel replies require an OpenClaw-owned prompt extension point and are not represented as covered until one is available and verified.
+4. The front door assembles the effective block on every request. A preference save needs no gateway restart; an upstream implementation that caches its first system message may apply it from the next fresh session, and the UI makes no stronger claim.

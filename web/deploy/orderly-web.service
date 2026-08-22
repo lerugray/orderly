@@ -51,6 +51,9 @@ Environment=ORDERLY_CALENDAR_SOCKET=/var/lib/orderly-calendar/calendar.sock
 # and the front door cannot write into an identity it is deliberately not.
 # Point this at the gateway-owned path when that milestone lands.
 Environment=ORDERLY_AGENTS_ROOT=/var/lib/orderly-web/.orderly/agents
+Environment=ORDERLY_CONNECTORS_CONFIG=/var/lib/orderly-web/.orderly/connectors.json
+Environment=ORDERLY_CONNECTOR_RUNTIME_SOCKET=/run/orderly-connectors/runtime.sock
+Environment=ORDERLY_REPLY_STYLE_CONFIG=/var/lib/orderly-web/.orderly/reply-style.json
 
 # The gateway bearer.
 #

@@ -34,6 +34,8 @@ DOCS_SET="${ORDERLY_OPENCLAW_DOCS+x}"
 ENV_FILES_SET="${ORDERLY_ENV_FILES+x}"
 BROKER_SOCKET_SET="${ORDERLY_BROKER_SOCKET+x}"
 CALENDAR_SOCKET_SET="${ORDERLY_CALENDAR_SOCKET+x}"
+CONNECTORS_CONFIG_SET="${ORDERLY_CONNECTORS_CONFIG+x}"
+REPLY_STYLE_CONFIG_SET="${ORDERLY_REPLY_STYLE_CONFIG+x}"
 
 unit_directive() {
   awk -F= -v name="$1" '
@@ -283,7 +285,25 @@ else
   fi
 fi
 
-APP_FILES="server.mjs settings.mjs queue.mjs calendar.mjs dashboard.mjs agents.mjs engines.mjs"
+if [ "$CONNECTORS_CONFIG_SET" = x ]; then
+  CONNECTORS_CONFIG="$ORDERLY_CONNECTORS_CONFIG"
+else
+  CONNECTORS_CONFIG="$(unit_environment ORDERLY_CONNECTORS_CONFIG "$PROPOSED_UNIT")"
+  CONNECTORS_CONFIG="${CONNECTORS_CONFIG:-$DEST/.orderly/connectors.json}"
+fi
+if [ "$REPLY_STYLE_CONFIG_SET" = x ]; then
+  REPLY_STYLE_CONFIG="$ORDERLY_REPLY_STYLE_CONFIG"
+else
+  REPLY_STYLE_CONFIG="$(unit_environment ORDERLY_REPLY_STYLE_CONFIG "$PROPOSED_UNIT")"
+  REPLY_STYLE_CONFIG="${REPLY_STYLE_CONFIG:-$DEST/.orderly/reply-style.json}"
+fi
+case "$CONNECTORS_CONFIG" in /*) ;; *) echo "ORDERLY_CONNECTORS_CONFIG must be absolute." >&2; exit 1 ;; esac
+case "$REPLY_STYLE_CONFIG" in /*) ;; *) echo "ORDERLY_REPLY_STYLE_CONFIG must be absolute." >&2; exit 1 ;; esac
+set_unit_environment ORDERLY_CONNECTORS_CONFIG "$CONNECTORS_CONFIG" 0
+set_unit_environment ORDERLY_REPLY_STYLE_CONFIG "$REPLY_STYLE_CONFIG" 0
+
+APP_FILES="server.mjs settings.mjs queue.mjs calendar.mjs dashboard.mjs agents.mjs engines.mjs reply-style.mjs connectors.mjs"
+CONNECTOR_FILES="catalog.mjs control.mjs connectorctl.mjs client.mjs service.mjs probes.mjs runtime.mjs"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "dry run: installing from $SRC -> $DEST"
@@ -303,6 +323,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
   for file in $APP_FILES; do
     print_root_command install -m 0644 "$SRC/$file" "$DEST/$file"
   done
+  print_root_command mkdir -p "$DEST/connectors"
+  for file in $CONNECTOR_FILES; do
+    print_root_command install -m 0644 "$SRC/../connectors/$file" "$DEST/connectors/$file"
+  done
   print_root_command install -m 0755 "$SRC/deploy/start-web.sh" "$DEST/start-web.sh"
   print_root_command rm -rf "$DEST/public"
   print_root_command cp -R "$SRC/public" "$DEST/public"
@@ -314,6 +338,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   for file in $APP_FILES start-web.sh; do
     print_root_command chown "$SERVICE_USER" "$DEST/$file"
   done
+  print_root_command chown -R "$SERVICE_USER" "$DEST/connectors"
   print_root_command chown -R "$SERVICE_USER" "$DEST/public"
   echo "service operations:"
   print_root_command systemctl daemon-reload
@@ -327,6 +352,10 @@ run_as_root mkdir -p "$DEST"
 for file in $APP_FILES; do
   run_as_root install -m 0644 "$SRC/$file" "$DEST/$file"
 done
+run_as_root mkdir -p "$DEST/connectors"
+for file in $CONNECTOR_FILES; do
+  run_as_root install -m 0644 "$SRC/../connectors/$file" "$DEST/connectors/$file"
+done
 run_as_root install -m 0755 "$SRC/deploy/start-web.sh" "$DEST/start-web.sh"
 run_as_root rm -rf "$DEST/public"
 run_as_root cp -R "$SRC/public" "$DEST/public"
@@ -335,6 +364,7 @@ run_as_root chown "$SERVICE_USER" "$DEST"
 for file in $APP_FILES start-web.sh; do
   run_as_root chown "$SERVICE_USER" "$DEST/$file"
 done
+run_as_root chown -R "$SERVICE_USER" "$DEST/connectors"
 run_as_root chown -R "$SERVICE_USER" "$DEST/public"
 
 if ! cmp -s "$UNIT" "$PROPOSED_UNIT" 2>/dev/null; then

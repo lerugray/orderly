@@ -61,6 +61,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { FIXED_REPLY_STYLE_CONTRACT } from "./reply-style.mjs";
 
 export class AgentsRefused extends Error {}
 const refuse = (message) => {
@@ -380,6 +381,10 @@ const STANDING_ORDERS = (record) =>
     "",
     "If something you are asked for needs a capability you do not have, say so",
     "plainly and stop. Do not describe a way around it.",
+    "",
+    "## Reply-style preferences",
+    "",
+    FIXED_REPLY_STYLE_CONTRACT,
     "",
   ].join("\n");
 

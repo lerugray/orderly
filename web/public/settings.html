@@ -48,6 +48,10 @@
             <span class="panelnav__name">Models</span>
             <span class="panelnav__note">What he thinks with</span>
           </button>
+          <button class="panelnav__opt" type="button" data-panel="reply-style">
+            <span class="panelnav__name">Reply style</span>
+            <span class="panelnav__note">How replies to you read</span>
+          </button>
           <button class="panelnav__opt" type="button" data-panel="providers">
             <span class="panelnav__name">Providers</span>
             <span class="panelnav__note">Where models come from</span>
@@ -91,6 +95,42 @@
                 <em>the station default</em> follows the setting above.
               </p>
               <div class="fields" id="agent-fields"></div>
+            </div>
+          </section>
+
+          <!-- ---------------- reply style ---------------- -->
+          <section class="panel" id="panel-reply-style" aria-label="Reply style">
+            <div class="fieldset">
+              <h2 class="label">How should replies to you read?</h2>
+              <p class="fieldset__intro">
+                This changes how the station talks to you. It does not add capabilities or
+                change approvals. Task accuracy and genuinely required clarification still win.
+              </p>
+              <label class="style-label" for="reply-instructions">Station instructions</label>
+              <textarea class="style-text" id="reply-instructions" rows="7" maxlength="8192"
+                placeholder="For example: Lead with the answer. Don't end with a question unless you need one."></textarea>
+              <p class="style-count" id="reply-count"></p>
+            </div>
+
+            <div class="fieldset">
+              <h2 class="label">Presets</h2>
+              <p class="fieldset__intro">Curated wording controls. The exact sentence shown is what enters the prompt.</p>
+              <div class="style-presets" id="reply-presets"></div>
+            </div>
+
+            <div class="fieldset">
+              <h2 class="label">Per agent</h2>
+              <p class="fieldset__intro">
+                An agent inherits the station settings until you give it a more specific instruction
+                or switch one preset on or off for that identity.
+              </p>
+              <div class="style-agents" id="reply-agents"></div>
+            </div>
+
+            <div class="fieldset">
+              <h2 class="label">Effective instruction preview</h2>
+              <pre class="style-preview" id="reply-preview"></pre>
+              <p class="field__warn" id="reply-fault" hidden></p>
             </div>
           </section>
 
@@ -167,7 +207,7 @@
       <form method="dialog" class="confirm__form">
         <h2 class="confirm__title">Save these changes?</h2>
         <ul class="confirm__list" id="confirm-list"></ul>
-        <div class="note note--warn">
+        <div class="note note--warn" id="confirm-restart-note">
           <p>
             <strong>This restarts the gateway.</strong> He'll be off his post for about ten
             seconds while it comes back — Telegram and any running task included. The current

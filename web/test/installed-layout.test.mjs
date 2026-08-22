@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -17,31 +16,11 @@ async function installedAppFiles() {
   return match[1].trim().split(/\s+/);
 }
 
-function waitForServer(child) {
-  return new Promise((resolveReady, reject) => {
-    let stdout = "";
-    let stderr = "";
-    const timeout = setTimeout(() => {
-      reject(new Error(`flat-layout server did not listen in time\nstdout: ${stdout}\nstderr: ${stderr}`));
-    }, 10_000);
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      const match = /listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(stdout);
-      if (!match) return;
-      clearTimeout(timeout);
-      resolveReady({ port: Number(match[1]), stderr: () => stderr });
-    });
-    child.once("exit", (code, signal) => {
-      clearTimeout(timeout);
-      reject(new Error(`flat-layout server exited before listening (${code ?? signal})\nstderr: ${stderr}`));
-    });
-  });
+async function installedConnectorFiles() {
+  const installer = await readFile(resolve(WEB, "deploy", "install.sh"), "utf8");
+  const match = /^CONNECTOR_FILES="([^"]+)"$/m.exec(installer);
+  assert.ok(match, "install.sh must declare its connector control files");
+  return match[1].trim().split(/\s+/);
 }
 
 test("the install.sh flat layout serves every shipped identity and settings", async (t) => {
@@ -61,8 +40,14 @@ test("the install.sh flat layout serves every shipped identity and settings", as
     "dashboard.mjs",
     "agents.mjs",
     "engines.mjs",
+    "reply-style.mjs",
+    "connectors.mjs",
   ]);
   for (const file of appFiles) await cp(resolve(WEB, file), join(installed, file));
+  await mkdir(join(installed, "connectors"));
+  for (const file of await installedConnectorFiles()) {
+    await cp(resolve(WEB, "..", "connectors", file), join(installed, "connectors", file));
+  }
   await cp(resolve(WEB, "public"), join(installed, "public"), { recursive: true });
 
   // This is host state, not a shipped web asset. It exercises the only uncaught
@@ -93,38 +78,14 @@ test("the install.sh flat layout serves every shipped identity and settings", as
     seats: { defaults: { capabilityTier: "chat-research", contextBudget: 32000 } },
   }));
 
-  const child = spawn(process.execPath, [join(installed, "server.mjs")], {
-    cwd: installed,
-    env: {
-      ...process.env,
-      HOME: serviceHome,
-      ORDERLY_WEB_PORT: "0",
-      ORDERLY_GATEWAY_PORT: "0",
-      ORDERLY_SETTINGS_WRITE: "off",
-      // Named agents write host state, so the flat install is pointed at the
-      // scratch home rather than the developer's — and the assertions below
-      // check that a station nobody has named an agent on writes nothing here.
-      ORDERLY_AGENTS_ROOT: join(serviceHome, ".orderly", "agents"),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  t.after(async () => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    child.kill("SIGTERM");
-    await new Promise((resolveExit) => child.once("exit", resolveExit));
-  });
-
-  let ready;
-  try {
-    ready = await waitForServer(child);
-  } catch (error) {
-    if (/listen EPERM: operation not permitted 127\.0\.0\.1/.test(error.message)) {
-      t.skip("sandbox denies loopback listen; the harvest host must run this flat-layout test");
-      return;
-    }
-    throw error;
-  }
-  const get = (path) => fetch(`http://127.0.0.1:${ready.port}${path}`);
+  process.env.HOME = serviceHome;
+  process.env.ORDERLY_SETTINGS_WRITE = "off";
+  process.env.ORDERLY_AGENTS_ROOT = join(serviceHome, ".orderly", "agents");
+  delete process.env.ORDERLY_CONFIG;
+  delete process.env.ORDERLY_CONNECTORS_CONFIG;
+  delete process.env.ORDERLY_REPLY_STYLE_CONFIG;
+  const { dispatchWebRequest } = await import(`${new URL(`file://${join(installed, "server.mjs")}`).href}?flat=${Date.now()}`);
+  const get = (path) => dispatchWebRequest({ url: path });
 
   const mark = await get("/mark.svg");
   assert.equal(mark.status, 200);
@@ -245,5 +206,28 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   const missing = await get("/api/agents/thread?agent=a-doesnotexist1");
   assert.equal(missing.status, 404);
 
-  assert.equal(ready.stderr(), "");
+  const connectors = await get("/api/connectors");
+  assert.equal(connectors.status, 200);
+  const connectorBody = await connectors.json();
+  assert.equal(connectorBody.state, "ok");
+  assert.ok(connectorBody.catalog.some((entry) => entry.id === "google-drive"));
+  assert.deepEqual(connectorBody.instances, []);
+  assert.equal(
+    await readFile(join(serviceHome, ".orderly", "connectors.json"), "utf8").then(
+      () => "written",
+      () => "absent",
+    ),
+    "absent",
+    "reading connector state must not create host state",
+  );
+
+  assert.equal(
+    await readFile(join(serviceHome, ".orderly", "reply-style.json"), "utf8").then(
+      () => "written",
+      () => "absent",
+    ),
+    "absent",
+    "reading reply style must not create host state",
+  );
+
 });

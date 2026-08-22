@@ -38,6 +38,10 @@ function makeDraft(payload) {
     },
     agents: {},
     tags: {},
+    replyStyle: structuredClone(payload.replyStyle?.value || {
+      station: { instructions: "", presets: {} },
+      agents: {},
+    }),
   };
   for (const a of payload.editable.agents) d.agents[a.id] = a.primary;
   for (const p of payload.editable.providers) {
@@ -151,6 +155,34 @@ function diff() {
     });
   }
   if (Object.keys(tags).length) edits.modelTags = tags;
+
+  const originalStyle = base.replyStyle?.value || { station: { instructions: "", presets: {} }, agents: {} };
+  if (JSON.stringify(draft.replyStyle.station) !== JSON.stringify(originalStyle.station)) {
+    edits.replyStyle ??= {};
+    edits.replyStyle.station = structuredClone(draft.replyStyle.station);
+    changes.push({
+      what: "Station reply style",
+      from: "current wording",
+      to: "the reviewed instructions and presets",
+    });
+  }
+  const styleAgents = new Set([
+    ...Object.keys(originalStyle.agents || {}),
+    ...Object.keys(draft.replyStyle.agents || {}),
+  ]);
+  for (const agentId of styleAgents) {
+    const before = originalStyle.agents?.[agentId] ?? null;
+    const after = draft.replyStyle.agents?.[agentId] ?? null;
+    if (JSON.stringify(before) === JSON.stringify(after)) continue;
+    edits.replyStyle ??= {};
+    edits.replyStyle.agents ??= {};
+    edits.replyStyle.agents[agentId] = after === null ? null : structuredClone(after);
+    changes.push({
+      what: `Reply style for ${agentId}`,
+      from: before ? "an agent-specific override" : "the station style",
+      to: after ? "the reviewed agent-specific override" : "the station style",
+    });
+  }
 
   return { changes, edits };
 }
@@ -309,6 +341,120 @@ function renderModels() {
       ),
     );
   }
+}
+
+function ensureAgentStyle(agentId) {
+  draft.replyStyle.agents[agentId] ??= { instructions: "", presets: {} };
+  return draft.replyStyle.agents[agentId];
+}
+
+function renderReplyStyle() {
+  const station = draft.replyStyle.station;
+  const textarea = el("reply-instructions");
+  textarea.value = station.instructions || "";
+  textarea.disabled = !base.writable;
+  textarea.oninput = () => {
+    station.instructions = textarea.value;
+    el("reply-count").textContent = `${new TextEncoder().encode(textarea.value).length} / 8192 bytes`;
+    renderReplyPreview();
+    refreshSaveBar();
+  };
+  el("reply-count").textContent = `${new TextEncoder().encode(textarea.value).length} / 8192 bytes`;
+
+  const presetHost = el("reply-presets");
+  clear(presetHost);
+  for (const preset of base.replyStyle.presets || []) {
+    const on = station.presets?.[preset.id] === true;
+    const button = add(presetHost, "button", `style-preset${on ? " is-on" : ""}`);
+    button.type = "button";
+    button.disabled = !base.writable;
+    button.setAttribute("aria-pressed", String(on));
+    add(button, "span", "style-preset__label", preset.label);
+    add(button, "span", "style-preset__sentence", preset.sentence);
+    button.addEventListener("click", () => {
+      station.presets[preset.id] = !on;
+      renderReplyStyle();
+      refreshSaveBar();
+    });
+  }
+
+  const agentHost = el("reply-agents");
+  clear(agentHost);
+  for (const agentId of base.replyStyle.eligibleAgents || []) {
+    const current = draft.replyStyle.agents?.[agentId] ?? null;
+    const box = add(agentHost, "details", "style-agent");
+    const summary = add(box, "summary", "style-agent__summary");
+    add(summary, "span", "style-agent__name", agentId);
+    add(summary, "span", "style-agent__state", current ? "has an override" : "inherits station settings");
+    const body = add(box, "div", "style-agent__body");
+    const input = add(body, "textarea", "style-text");
+    input.rows = 4;
+    input.maxLength = 8192;
+    input.placeholder = "Optional instructions for this agent only";
+    input.value = current?.instructions || "";
+    input.disabled = !base.writable;
+    input.addEventListener("input", () => {
+      ensureAgentStyle(agentId).instructions = input.value;
+      renderReplyPreview();
+      refreshSaveBar();
+    });
+
+    const overrides = add(body, "div", "style-overrides");
+    for (const preset of base.replyStyle.presets || []) {
+      const row = add(overrides, "label", "style-override");
+      add(row, "span", null, preset.label);
+      const select = add(row, "select", "select");
+      select.disabled = !base.writable;
+      for (const [value, label] of [["inherit", "Inherit"], ["on", "On"], ["off", "Off"]]) {
+        const option = add(select, "option", null, label);
+        option.value = value;
+      }
+      const state = current?.presets?.[preset.id];
+      select.value = state === true ? "on" : state === false ? "off" : "inherit";
+      select.addEventListener("change", () => {
+        const record = ensureAgentStyle(agentId);
+        if (select.value === "inherit") delete record.presets[preset.id];
+        else record.presets[preset.id] = select.value === "on";
+        renderReplyPreview();
+        refreshSaveBar();
+      });
+    }
+    const clearButton = add(body, "button", "ghost", "Clear override");
+    clearButton.type = "button";
+    clearButton.disabled = !base.writable || !current;
+    clearButton.addEventListener("click", () => {
+      delete draft.replyStyle.agents[agentId];
+      renderReplyStyle();
+      refreshSaveBar();
+    });
+  }
+
+  el("reply-fault").hidden = !base.replyStyle.fault;
+  el("reply-fault").textContent = base.replyStyle.fault
+    ? `Stored reply style is invalid and will be omitted from prompts: ${base.replyStyle.fault}`
+    : "";
+  renderReplyPreview();
+}
+
+function renderReplyPreview() {
+  const lines = [];
+  const byId = new Map((base.replyStyle.presets || []).map((preset) => [preset.id, preset]));
+  for (const [id, on] of Object.entries(draft.replyStyle.station.presets || {})) {
+    if (on && byId.has(id)) lines.push(byId.get(id).sentence);
+  }
+  if (draft.replyStyle.station.instructions) lines.push(draft.replyStyle.station.instructions);
+  for (const [agentId, record] of Object.entries(draft.replyStyle.agents || {})) {
+    const changes = [];
+    for (const [id, state] of Object.entries(record.presets || {})) {
+      const preset = byId.get(id);
+      if (preset) changes.push(`${state ? "On" : "Off"}: ${preset.label}`);
+    }
+    if (record.instructions) changes.push(record.instructions);
+    if (changes.length) lines.push(`${agentId}: ${changes.join(" · ")}`);
+  }
+  el("reply-preview").textContent = lines.length
+    ? lines.join("\n\n")
+    : "No editable style instructions are enabled. The fixed safety and precedence contract still applies.";
 }
 
 function renderProviders() {
@@ -540,6 +686,7 @@ function renderDuty() {
 function render() {
   renderAppearance();
   renderModels();
+  renderReplyStyle();
   renderProviders();
   renderDuty();
   refreshSaveBar();
@@ -550,7 +697,7 @@ function render() {
 const dialog = el("confirm");
 
 function openConfirm() {
-  const { changes } = diff();
+  const { changes, edits } = diff();
   if (!changes.length) return;
   const list = el("confirm-list");
   clear(list);
@@ -563,8 +710,10 @@ function openConfirm() {
     add(move, "span", "confirm__to", c.to);
   }
   el("progress").hidden = true;
+  const styleOnly = Object.keys(edits).length === 1 && edits.replyStyle !== undefined;
+  el("confirm-restart-note").hidden = styleOnly;
   el("do-save").disabled = false;
-  el("do-save").textContent = "Save and restart";
+  el("do-save").textContent = styleOnly ? "Save reply style" : "Save and restart";
   dialog.showModal();
 }
 
@@ -608,6 +757,15 @@ async function save() {
     return;
   }
 
+  if (result.reloadRequired === false) {
+    progress("Saved. New replies will use the updated style.", 100);
+    await sleep(500);
+    dialog.close();
+    await load();
+    flash("Reply style saved · no gateway restart needed");
+    return;
+  }
+
   // The gateway watches its own config: it either hot-reloads or restarts, and
   // systemd holds it up either way. So this waits on evidence rather than
   // announcing an outcome — and reports which of the two actually happened.
@@ -642,7 +800,7 @@ async function save() {
         await sleep(700);
         dialog.close();
         await load();
-        flash(`Saved · backed up as ${result.backup}`);
+        flash(result.backup ? `Saved · backed up as ${result.backup}` : "Saved");
         return;
       }
     }

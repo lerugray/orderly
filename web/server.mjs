@@ -49,7 +49,15 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readSettings, writeSettings, writeProviderDefinition, Refused } from "./settings.mjs";
+import {
+  readReplyStyleRecord,
+  readSettings,
+  writeReplyStyle,
+  writeSettings,
+  writeProviderDefinition,
+  Refused,
+} from "./settings.mjs";
+import { appendReplyStylePrompt, renderReplyStyle } from "./reply-style.mjs";
 import {
   activateAgent,
   AgentsRefused,
@@ -81,6 +89,14 @@ import {
   QuotaAdapter,
   QuotaProbeError,
 } from "./dashboard.mjs";
+import {
+  confirmAttachment,
+  connectorControlView,
+  ConnectorRefused,
+  ConnectorRuntimeRefused,
+  proposeAttachment,
+  requestConnectorLifecycle,
+} from "./connectors.mjs";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 const PUBLIC_DIR = resolve(HERE, "public");
@@ -132,6 +148,13 @@ const DASHBOARD_CONFIG =
 const DASHBOARD_CACHE =
   process.env.ORDERLY_DASHBOARD_CACHE ||
   join(process.env.HOME || "", ".orderly", "dashboard-cache.json");
+const CONNECTORS_CONFIG =
+  process.env.ORDERLY_CONNECTORS_CONFIG ||
+  join(process.env.HOME || "", ".orderly", "connectors.json");
+const CONNECTOR_RUNTIME_SOCKET = process.env.ORDERLY_CONNECTOR_RUNTIME_SOCKET || null;
+const REPLY_STYLE_CONFIG =
+  process.env.ORDERLY_REPLY_STYLE_CONFIG ||
+  join(process.env.HOME || "", ".orderly", "reply-style.json");
 // The loopback `codexbar serve` run by the credential-owning user. Subscriptions
 // declaring source codexbar-loopback are read from here, so this service needs
 // no provider credential of its own. Asserted loopback in dashboard.mjs.
@@ -441,8 +464,8 @@ export function agentSessionKey(id) {
 // an event proposal would put a card on the approval queue from an identity
 // that holds no capability to have produced it. The queue is for work the mail
 // desk actually did.
-export function agentSystemPrompt(agent) {
-  return [
+export function agentSystemPrompt(agent, rendered = renderReplyStyle({}, agent.id, [agent.id])) {
+  const base = [
     `You are "${agent.name}", a named identity on a private, single-operator station.`,
     agent.description
       ? `Your standing purpose, in the operator's own words: ${agent.description}`
@@ -456,6 +479,7 @@ export function agentSystemPrompt(agent) {
     "Reply in plain prose, briefly. Do not use markdown tables. Never emit fenced blocks",
     "tagged orderly-card; that surface belongs to identities that can actually act.",
   ].join("\n");
+  return appendReplyStylePrompt(base, rendered);
 }
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -589,6 +613,27 @@ async function handleChat(req, res) {
   if (!gate.allowed) return jsonError(res, 403, engineRefusalText(gate.refusal));
   discloseEngine(res, gate);
 
+  // Preferences are host configuration, read at prompt assembly time. The
+  // agent gets only the rendered lower-precedence block; it never gets the
+  // config file or a route back to the settings endpoint.
+  let renderedStyle = renderReplyStyle({}, named?.id ?? desk, [named?.id ?? desk]);
+  try {
+    const gatewayConfig = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+    const replyStyleRecord = await readReplyStyleRecord(REPLY_STYLE_CONFIG);
+    const configured = Array.isArray(gatewayConfig?.agents?.list)
+      ? gatewayConfig.agents.list.map((agent) => agent?.id).filter((id) => typeof id === "string")
+      : [];
+    const custom = (await listAgents({ root: AGENTS_ROOT })).map((agent) => agent.id);
+    renderedStyle = renderReplyStyle(
+      { orderly: { replyStyle: replyStyleRecord.replyStyle } },
+      named?.id ?? desk,
+      [...configured, ...custom],
+    );
+    if (renderedStyle.fault) res.setHeader("X-Orderly-Reply-Style", "invalid-omitted");
+  } catch {
+    res.setHeader("X-Orderly-Reply-Style", "unreadable-omitted");
+  }
+
   const upstreamBody = JSON.stringify({
     model: named ? AGENT_SEAT : DESKS[desk],
     stream: wantsStream,
@@ -596,7 +641,12 @@ async function handleChat(req, res) {
     // only the new question crosses. Without one the page's own history is the
     // only memory there is, so all of it does.
     messages: [
-      { role: "system", content: named ? agentSystemPrompt(named) : CARD_CONTRACT },
+      {
+        role: "system",
+        content: named
+          ? agentSystemPrompt(named, renderedStyle)
+          : appendReplyStylePrompt(CARD_CONTRACT, renderedStyle),
+      },
       ...(thread ? checked.messages.slice(-1) : checked.messages),
     ],
   });
@@ -804,6 +854,98 @@ async function handleAgentsGet(_req, res) {
     });
   }
 }
+
+function connectorAgentProjection(agent) {
+  return {
+    id: agent.id,
+    name: agent.name,
+    lifecycle: agent.lifecycle,
+    memoryPolicy: agent.memoryPolicy,
+  };
+}
+
+async function findConnectorAgent(id) {
+  const system = SYSTEM_AGENTS.find((agent) => agent.id === id);
+  if (system) return connectorAgentProjection(system);
+  const named = await findAgent({ root: AGENTS_ROOT, id });
+  return named ? connectorAgentProjection(named) : null;
+}
+
+export async function handleConnectorsGet(_req, res) {
+  try {
+    const [view, roster] = await Promise.all([
+      connectorControlView({ statePath: CONNECTORS_CONFIG }),
+      agentsRoster({ root: AGENTS_ROOT, systemAgents: SYSTEM_AGENTS }),
+    ]);
+    sendJson(res, 200, {
+      ...view,
+      agents: [...roster.system, ...roster.agents].map(connectorAgentProjection),
+    });
+  } catch (error) {
+    sendJson(res, 200, {
+      state: "error",
+      catalog: [], instances: [], attachments: [], agents: [],
+      error: error instanceof ConnectorRefused ? error.message : "Connector control state could not be read.",
+    });
+  }
+}
+
+export function createConnectorsPostHandler({ runtimeCall = requestConnectorLifecycle } = {}) {
+  let connectorWriteInFlight = false;
+  return async function handleConnectorsPost(req, res) {
+  if (!sameOrigin(req)) return jsonError(res, 403, "That request didn't come from this page.");
+  if (connectorWriteInFlight) return jsonError(res, 409, "A connector ruling is already going through.");
+  let body;
+  try { body = JSON.parse(await readBody(req)); } catch { return jsonError(res, 400, "Unreadable request."); }
+  const allowed = body?.action === "propose"
+    ? ["action", "connectorId", "agentId", "operations"]
+    : body?.action === "confirm"
+      ? ["action", "connectorId", "agentId", "operations", "confirmationDigest"]
+      : ["suspend", "resume", "detach"].includes(body?.action)
+        ? ["action", "attachmentId"]
+      : null;
+  if (!allowed) return jsonError(res, 400, "That isn't a connector action this desk can perform.");
+  for (const key of Object.keys(body)) {
+    if (!allowed.includes(key)) return jsonError(res, 400, `"${key}" is not part of a connector ${body.action} request.`);
+  }
+  connectorWriteInFlight = true;
+  try {
+    if (["suspend", "resume", "detach"].includes(body.action)) {
+      if (!CONNECTOR_RUNTIME_SOCKET) throw new ConnectorRuntimeRefused("Connector runtime control is not installed on this station.");
+      return sendJson(res, 200, await runtimeCall({
+        socketPath: CONNECTOR_RUNTIME_SOCKET,
+        action: body.action,
+        attachmentId: body.attachmentId,
+      }));
+    }
+    const agent = await findConnectorAgent(body.agentId);
+    if (!agent) throw new ConnectorRefused("That isn't an agent on this station.");
+    if (body.action === "propose") {
+      return sendJson(res, 200, await proposeAttachment({
+        statePath: CONNECTORS_CONFIG,
+        connectorId: body.connectorId,
+        agent,
+        operations: body.operations,
+      }));
+    }
+    return sendJson(res, 200, await confirmAttachment({
+      statePath: CONNECTORS_CONFIG,
+      connectorId: body.connectorId,
+      agent,
+      operations: body.operations,
+      confirmationDigest: body.confirmationDigest,
+    }));
+  } catch (error) {
+    if (error instanceof ConnectorRefused || error instanceof ConnectorRuntimeRefused) return jsonError(res, 400, error.message);
+    console.error("[orderly-web] connector ruling failed:", error?.code || error?.message || "unknown");
+    return jsonError(res, 500, "The connector ruling could not be recorded. Nothing was changed.");
+  } finally {
+    connectorWriteInFlight = false;
+  }
+  };
+}
+
+export const handleConnectorsPost = createConnectorsPostHandler();
 
 // One writer at a time and not on a hair trigger, the same shape the settings
 // write uses — creating an identity lays down a directory tree, and a page that
@@ -1217,8 +1359,15 @@ const WRITE_COOLDOWN_MS = 5000;
 
 async function handleSettingsGet(req, res) {
   try {
+    const namedAgentIds = (await listAgents({ root: AGENTS_ROOT })).map((agent) => agent.id);
     const [settings, gateway, service] = await Promise.all([
-      readSettings({ configPath: CONFIG_PATH, envPaths: ENV_PATHS, docsDir: DOCS_DIR }),
+      readSettings({
+        configPath: CONFIG_PATH,
+        envPaths: ENV_PATHS,
+        docsDir: DOCS_DIR,
+        eligibleAgentIds: namedAgentIds,
+        replyStylePath: REPLY_STYLE_CONFIG,
+      }),
       probeGateway(),
       probeService(),
     ]);
@@ -1266,7 +1415,24 @@ async function handleSettingsPost(req, res) {
 
   writeInFlight = true;
   try {
-    const result = await writeSettings({ configPath: CONFIG_PATH, edits });
+    const namedAgentIds = (await listAgents({ root: AGENTS_ROOT })).map((agent) => agent.id);
+    let result;
+    if (edits?.replyStyle !== undefined) {
+      if (Object.keys(edits).some((key) => key !== "replyStyle")) {
+        throw new Refused("Save reply-style and model changes separately so each record remains atomic.");
+      }
+      const gatewayConfig = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+      const configuredIds = Array.isArray(gatewayConfig?.agents?.list)
+        ? gatewayConfig.agents.list.map((agent) => agent?.id).filter((id) => typeof id === "string")
+        : [];
+      result = await writeReplyStyle({
+        replyStylePath: REPLY_STYLE_CONFIG,
+        edits: edits.replyStyle,
+        eligibleAgentIds: [...configuredIds, ...namedAgentIds],
+      });
+    } else {
+      result = await writeSettings({ configPath: CONFIG_PATH, edits, eligibleAgentIds: namedAgentIds });
+    }
     lastWriteAt = Date.now();
     // the status endpoint's 30-second cache would otherwise report the old model
     configCache = { at: 0, value: null };
@@ -1274,6 +1440,7 @@ async function handleSettingsPost(req, res) {
       ok: true,
       changed: result.changed,
       backup: result.backup,
+      reloadRequired: result.reloadRequired !== false,
       // What happens next is the gateway's business, not ours: it watches its
       // own config and either hot-reloads or restarts (gateway.reload, default
       // hybrid). Either way systemd holds the service up. The page polls health.
@@ -1836,7 +2003,7 @@ async function handleThemeMascot(req, res, urlPath) {
   }
 }
 
-const server = createServer((req, res) => {
+export function handleWebRequest(req, res) {
   const url = new URL(req.url, "http://localhost");
   const urlPath = url.pathname;
   if (urlPath.startsWith(`${BROKER_PREFIX}/`)) {
@@ -1875,6 +2042,9 @@ const server = createServer((req, res) => {
   if (urlPath === "/api/agents" && req.method === "POST") {
     return void handleAgentsPost(req, res);
   }
+  if (urlPath === "/api/connectors" && req.method === "POST") {
+    return void handleConnectorsPost(req, res);
+  }
   if (urlPath === "/api/dashboard/refresh" && req.method === "POST") {
     return void dashboardHandlers.post(req, res);
   }
@@ -1887,6 +2057,7 @@ const server = createServer((req, res) => {
   if (urlPath === "/api/reminders") return void handleReminders(req, res);
   if (urlPath === "/api/queue") return void handleQueueGet(req, res);
   if (urlPath === "/api/settings") return void handleSettingsGet(req, res);
+  if (urlPath === "/api/connectors") return void handleConnectorsGet(req, res);
   if (urlPath === "/api/engines") return void handleEnginesGet(req, res);
   if (urlPath === "/api/settings/health") return void handleSettingsHealth(req, res);
   if (urlPath === "/api/dashboard") return void dashboardHandlers.get(req, res);
@@ -1918,7 +2089,61 @@ const server = createServer((req, res) => {
     return void handleThemeMascot(req, res, urlPath);
   }
   return void handleStatic(req, res, urlPath);
-});
+}
+
+// Drive the production router without opening a listener. This is used by the
+// release verifier and flat-layout tests on hosts whose sandbox policy denies
+// TCP/Unix listen while still exercising the same route handlers and files.
+export async function dispatchWebRequest({ method = "GET", url = "/", headers = {}, body = "" }) {
+  const [{ Readable }, { EventEmitter }] = await Promise.all([import("node:stream"), import("node:events")]);
+  const req = Readable.from(body === "" ? [] : [Buffer.from(typeof body === "string" ? body : JSON.stringify(body))]);
+  req.method = method;
+  req.url = url;
+  req.headers = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
+  const events = new EventEmitter();
+  let finish;
+  const completed = new Promise((resolveDone) => { finish = resolveDone; });
+  const res = {
+    statusCode: 200,
+    headers: {},
+    chunks: [],
+    setHeader(key, value) { this.headers[String(key).toLowerCase()] = value; },
+    getHeader(key) { return this.headers[String(key).toLowerCase()]; },
+    writeHead(status, values = {}) {
+      this.statusCode = status;
+      for (const [key, value] of Object.entries(values)) this.setHeader(key, value);
+      return this;
+    },
+    write(chunk) { if (chunk !== undefined && chunk !== null) this.chunks.push(Buffer.from(chunk)); return true; },
+    end(chunk) {
+      if (chunk !== undefined && chunk !== null) this.chunks.push(Buffer.from(chunk));
+      finish();
+      return this;
+    },
+    on(name, listener) { events.on(name, listener); return this; },
+    once(name, listener) { events.once(name, listener); return this; },
+    removeListener(name, listener) { events.removeListener(name, listener); return this; },
+    emit(name, ...args) { return events.emit(name, ...args); },
+    writable: true,
+  };
+  handleWebRequest(req, res);
+  await completed;
+  const buffer = Buffer.concat(res.chunks);
+  const responseHeaders = { ...res.headers };
+  Object.defineProperty(responseHeaders, "get", {
+    enumerable: false,
+    value: (name) => res.headers[String(name).toLowerCase()] ?? null,
+  });
+  return {
+    status: res.statusCode,
+    headers: responseHeaders,
+    text: () => buffer.toString("utf8"),
+    json: () => JSON.parse(buffer.toString("utf8")),
+    body: buffer,
+  };
+}
+
+export const server = createServer(handleWebRequest);
 
 if (resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
   server.listen(WEB_PORT, "127.0.0.1", () => {

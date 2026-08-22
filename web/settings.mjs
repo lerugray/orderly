@@ -25,8 +25,9 @@
 // are referred to by env-var NAME only, and presence is reported as a boolean
 // derived from the name alone.
 
-import { readFile, writeFile, copyFile, rename, open, readdir, unlink, stat } from "node:fs/promises";
+import { readFile, writeFile, copyFile, rename, open, readdir, unlink, stat, mkdir } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
+import { applyReplyStyleEdits, replyStyleView, ReplyStyleRefused } from "./reply-style.mjs";
 
 // ---------------------------------------------------------------------------
 // provider catalog — what this OpenClaw supports, and the env var each wants
@@ -314,7 +315,31 @@ function dutyView(doc) {
   };
 }
 
-export async function readSettings({ configPath, envPaths, docsDir }) {
+function replyStyleAgentIds(doc, extra = []) {
+  return [...new Set([
+    ...(Array.isArray(doc?.agents?.list) ? doc.agents.list.map((agent) => agent?.id) : []),
+    ...extra,
+  ].filter((id) => typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id)))];
+}
+
+export async function readReplyStyleRecord(replyStylePath) {
+  if (!replyStylePath) return { v: 1, replyStyle: undefined };
+  let raw;
+  try {
+    raw = await readFile(replyStylePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return { v: 1, replyStyle: undefined };
+    throw error;
+  }
+  let record;
+  try { record = JSON.parse(raw); } catch { return { v: 1, replyStyle: { malformed: true } }; }
+  if (!isObj(record) || record.v !== 1 || Object.keys(record).some((key) => key !== "v" && key !== "replyStyle")) {
+    return { v: 1, replyStyle: { malformed: true } };
+  }
+  return record;
+}
+
+export async function readSettings({ configPath, envPaths, docsDir, eligibleAgentIds = [], replyStylePath = null }) {
   const raw = await readFile(configPath, "utf8");
   const doc = JSON.parse(raw);
   const present = await envNames(envPaths);
@@ -337,6 +362,8 @@ export async function readSettings({ configPath, envPaths, docsDir }) {
     entry.configured = providers.some((p) => p.apiKeyEnv === entry.env);
   }
 
+  const replyStyleRecord = await readReplyStyleRecord(replyStylePath);
+  const replyStyleDoc = { orderly: { replyStyle: replyStyleRecord.replyStyle } };
   return {
     editable: {
       defaults: {
@@ -353,6 +380,10 @@ export async function readSettings({ configPath, envPaths, docsDir }) {
       providers,
     },
     duty: dutyView(doc),
+    replyStyle: {
+      ...replyStyleView(replyStyleDoc, replyStyleAgentIds(doc, eligibleAgentIds)),
+      eligibleAgents: replyStyleAgentIds(doc, eligibleAgentIds),
+    },
     supported,
     envPaths,
     writable,
@@ -379,7 +410,7 @@ const refuse = (msg) => {
 // places written here.
 const ENVELOPE_KEYS = ["defaults", "agents", "modelTags"];
 
-function applyEdits(doc, edits) {
+function applyEdits(doc, edits, eligibleAgentIds = []) {
   if (!isObj(edits)) refuse("Nothing to change.");
   // Name anything unrecognised rather than ignoring it: a caller aiming at a
   // part of the config this page doesn't own should be told so, not answered
@@ -745,10 +776,10 @@ async function pruneBackups(dir, keep) {
 
 // The whole write, gates and all. Returns what changed; throws Refused with an
 // operator-readable reason if any gate says no.
-export async function writeSettings({ configPath, edits }) {
+export async function writeSettings({ configPath, edits, eligibleAgentIds = [] }) {
   const raw = await readFile(configPath, "utf8");
   const before = JSON.parse(raw);
-  const after = applyEdits(JSON.parse(raw), edits);
+  const after = applyEdits(JSON.parse(raw), edits, eligibleAgentIds);
 
   // Gate 2 — every changed path must be one we meant to offer.
   const changed = changedPaths(before, after);
@@ -775,6 +806,63 @@ export async function writeSettings({ configPath, edits }) {
 
   const written = await persist(configPath, after);
   return { changed, ...written };
+}
+
+const REPLY_ALLOWED = [
+  /^orderly\.replyStyle$/,
+  /^orderly\.replyStyle\.(station|agents)$/,
+  /^orderly\.replyStyle\.station\.(instructions|presets)$/,
+  /^orderly\.replyStyle\.station\.presets\.[a-z0-9-]+$/,
+  /^orderly\.replyStyle\.agents\.[A-Za-z0-9_-]+$/,
+  /^orderly\.replyStyle\.agents\.[A-Za-z0-9_-]+\.(instructions|presets)$/,
+  /^orderly\.replyStyle\.agents\.[A-Za-z0-9_-]+\.presets\.[a-z0-9-]+$/,
+];
+
+export async function writeReplyStyle({ replyStylePath, edits, eligibleAgentIds = [] }) {
+  if (!replyStylePath) refuse("Reply-style storage is not configured on this station.");
+  const record = await readReplyStyleRecord(replyStylePath);
+  const before = { orderly: { replyStyle: record.replyStyle } };
+  const after = JSON.parse(JSON.stringify(before));
+  try {
+    applyReplyStyleEdits(after, edits, eligibleAgentIds);
+  } catch (error) {
+    if (error instanceof ReplyStyleRefused) refuse(error.message);
+    throw error;
+  }
+  const changed = changedPaths(before, after);
+  if (!changed.length) refuse("Nothing changed.");
+  for (const path of changed) {
+    if (!REPLY_ALLOWED.some((pattern) => pattern.test(path))) {
+      refuse(`Refused: that would have changed ${path}, which reply style may not touch.`);
+    }
+  }
+  const dir = dirname(replyStylePath);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  let backup = null;
+  try {
+    await stat(replyStylePath);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    backup = `${basename(replyStylePath)}.orderly-bak-${stamp}`;
+    await copyFile(replyStylePath, join(dir, backup));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const tmp = join(dir, `.${basename(replyStylePath)}.tmp-${process.pid}-${Date.now()}`);
+  const body = `${JSON.stringify({ v: 1, replyStyle: after.orderly.replyStyle }, null, 2)}\n`;
+  await writeFile(tmp, body, { mode: 0o600 });
+  const handle = await open(tmp, "r+");
+  try { await handle.sync(); } finally { await handle.close(); }
+  await rename(tmp, replyStylePath);
+  try {
+    const prefix = `${basename(replyStylePath)}.orderly-bak-`;
+    const backups = (await readdir(dir)).filter((name) => name.startsWith(prefix)).sort();
+    for (const name of backups.slice(0, Math.max(0, backups.length - 10))) {
+      await unlink(join(dir, name)).catch(() => {});
+    }
+  } catch {
+    // Backup pruning is housekeeping; the authoritative write already completed.
+  }
+  return { changed, backup, bytes: Buffer.byteLength(body), reloadRequired: false };
 }
 
 // Back up beside the file, write a temp file, fsync, rename. Atomic: a full

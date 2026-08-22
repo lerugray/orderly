@@ -25,6 +25,7 @@ el("bar-where").textContent =
     : "Private station · tailnet";
 
 let roster = { system: [], agents: [], counts: { named: 0, active: 0, pending: 0 } };
+let connectorState = { state: "ok", catalog: [], instances: [], attachments: [], agents: [] };
 let busy = false;
 // The probe summaries §5.2 says the operator receives, kept per identity so the
 // page can show what was actually checked rather than the word "active".
@@ -60,10 +61,25 @@ async function ask(body) {
   return payload;
 }
 
+async function askConnector(body) {
+  const res = await fetch("/api/connectors", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload?.error || `The connector control answered ${res.status}.`);
+  return payload;
+}
+
 async function refresh() {
   try {
-    const res = await fetch("/api/agents", { headers: { Accept: "application/json" } });
-    roster = await res.json();
+    const [agentsRes, connectorsRes] = await Promise.all([
+      fetch("/api/agents", { headers: { Accept: "application/json" } }),
+      fetch("/api/connectors", { headers: { Accept: "application/json" } }),
+    ]);
+    roster = await agentsRes.json();
+    connectorState = await connectorsRes.json();
   } catch {
     state("The station didn't answer. Nothing was changed.", "error");
     return;
@@ -88,6 +104,7 @@ async function refresh() {
     minute: "2-digit",
   })}`;
   draw();
+  drawConnectors();
 }
 
 function draw() {
@@ -162,6 +179,118 @@ function drawRow(list, agent) {
       if (!sure) return null;
       return ask({ action: "remove", id: agent.id });
     });
+  }
+}
+
+function drawConnectors() {
+  const host = el("connector-instances");
+  host.textContent = "";
+  el("connectors-when").textContent = `read ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  if (connectorState.state === "error") {
+    add(host, "p", "field__warn", connectorState.error || "Connector state could not be read.");
+  } else if (!(connectorState.instances || []).length) {
+    add(host, "p", "roster__note", "No connector instance is installed. Reading this page created nothing.");
+  }
+
+  for (const instance of connectorState.instances || []) {
+    const card = add(host, "article", "connector-card");
+    const head = add(card, "div", "roster__head");
+    add(head, "span", "roster__name", instance.label);
+    add(head, "code", "roster__handle", instance.id);
+    add(head, "span", `chip ${instance.lifecycle === "active" ? "chip--read" : "chip--off"}`, instance.lifecycle);
+    add(card, "p", "roster__what", `${instance.accountLabel} · ${instance.kind}`);
+
+    const existing = (connectorState.attachments || []).find(
+      (attachment) => attachment.connectorId === instance.id && attachment.lifecycle !== "detached",
+    );
+    if (existing) {
+      add(card, "p", "roster__facts", `Ruled to ${existing.agentId} · ${existing.lifecycle} · ${existing.operations.join(", ")}`);
+      if (existing.lifecycle === "approved-pending-runtime") {
+        add(card, "p", "roster__note", "Approved only. The socket is not active until the host mount and negative-access probes pass.");
+      }
+      const controls = add(card, "span", "roster__acts");
+      const lifecycleAction = (label, action, warning) => act(controls, label, async () => {
+        if (warning && !window.confirm(warning)) return null;
+        return askConnector({ action, attachmentId: existing.id });
+      });
+      if (existing.lifecycle === "active") {
+        lifecycleAction("Suspend", "suspend", `Suspend ${instance.label}?\n\nThe host controller removes and checks the socket route before recording it suspended.`);
+      }
+      if (existing.lifecycle === "suspended") {
+        lifecycleAction("Resume", "resume", `Resume ${instance.label}?\n\nThe host controller restores the derived route and reruns every mount and negative-access probe first.`);
+      }
+      lifecycleAction("Detach", "detach", `Detach ${instance.label} from ${existing.agentId}?\n\nThe host controller removes and checks the runtime route before recording the attachment detached. The connector account itself is not revoked or deleted.`);
+      continue;
+    }
+    if (instance.lifecycle !== "active") {
+      add(card, "p", "roster__note", "Not attachable until its dedicated service and isolation probes pass.");
+      continue;
+    }
+
+    const controls = add(card, "div", "connector-attach");
+    const agentSelect = add(controls, "select", "select");
+    for (const agent of (connectorState.agents || []).filter((item) => item.lifecycle === "active")) {
+      const option = add(agentSelect, "option", null, `${agent.name} (${agent.id})`);
+      option.value = agent.id;
+    }
+    const operations = add(controls, "div", "connector-ops");
+    for (const operation of instance.operations.filter((item) => item.mode !== "apply")) {
+      const label = add(operations, "label", "connector-op");
+      const check = add(label, "input");
+      check.type = "checkbox";
+      check.value = operation.id;
+      check.checked = operation.mode === "read";
+      add(label, "span", null, `${operation.label} · ${operation.mode}`);
+    }
+    const button = add(controls, "button", "cta cta--solid", "Review attachment");
+    button.type = "button";
+    button.disabled = !(connectorState.agents || []).some((item) => item.lifecycle === "active");
+    button.addEventListener("click", async () => {
+      if (busy) return;
+      const selected = [...operations.querySelectorAll("input:checked")].map((input) => input.value);
+      if (!selected.length) return state("Choose at least one typed operation.", "error");
+      busy = true;
+      try {
+        const proposal = await askConnector({
+          action: "propose", connectorId: instance.id, agentId: agentSelect.value, operations: selected,
+        });
+        const summary = proposal.summary;
+        const sure = window.confirm([
+          `Attach ${summary.connector.label} to ${summary.agent.name}?`,
+          "",
+          `External account: ${summary.connector.accountLabel}`,
+          `Operations: ${summary.operations.map((operation) => `${operation.label} [${operation.mode}]`).join(", ")}`,
+          `Provider egress: ${summary.connector.egressHosts.join(", ")}`,
+          summary.returnedData,
+          "",
+          summary.boundary,
+          "",
+          "Approval records the ruling only. It does not activate a socket mount.",
+          `Digest: ${proposal.digest}`,
+        ].join("\n"));
+        if (!sure) return;
+        const result = await askConnector({
+          action: "confirm", connectorId: instance.id, agentId: agentSelect.value,
+          operations: selected, confirmationDigest: proposal.digest,
+        });
+        state(result.note || "Connector ruling recorded.", "ok");
+      } catch (error) {
+        state(String(error?.message || "The connector ruling did not go through."), "error");
+      } finally {
+        busy = false;
+        await refresh();
+      }
+    });
+  }
+
+  const catalog = el("connector-catalog");
+  catalog.textContent = "";
+  for (const kind of connectorState.catalog || []) {
+    const row = add(catalog, "div", "cat");
+    add(row, "span", "cat__name", kind.label);
+    add(row, "span", "cat__env", kind.family);
+    add(row, "span", `chip ${kind.maturity === "reserved" ? "chip--off" : "chip--read"}`,
+      kind.maturity === "reserved" ? "Catalog only" : "Existing precedent");
   }
 }
 
