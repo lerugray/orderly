@@ -237,9 +237,12 @@ async function readPendingFile(pendingPath) {
     };
     if (readableProposal(item)) events.push(item);
   }
+  // Bound the page in readQueue, after decisions are known. Truncating here
+  // drops items that have no answer yet and makes counts.pending describe the
+  // page rather than the work.
   return {
     present: true,
-    items: [...drafts.slice(-PENDING_MAX), ...events.slice(-PENDING_MAX)],
+    items: [...drafts, ...events],
   };
 }
 
@@ -266,9 +269,16 @@ function sameItem(a, b) {
   if ((a.type ?? "draft") !== (b.type ?? "draft")) return false;
   if (a.account && b.account && a.account !== b.account) return false;
   if ((a.type ?? "draft") === "event") {
-    if (a.action !== b.action) return false;
-    if (norm(a.summary) !== norm(b.summary)) return false;
-    return a.from === b.from && a.to === b.to;
+    // Two proposals are the same proposal only when approving either would send
+    // the same thing, compared exactly as web/calendar.mjs would send it.
+    //
+    // PENDING.md has ten columns and cannot express location or description, so
+    // a line from the log always reports them absent. Absent-because-the-format
+    // cannot-say-it is not the same as different: comparing those fields across
+    // sources would split one real proposal into two cards. They are compared
+    // only when both sides came from a source that can carry them.
+    const loggedSide = a.origin === "agent" || b.origin === "agent";
+    return effectOf(a, loggedSide) === effectOf(b, loggedSide);
   }
   if (norm(a.subject) !== norm(b.subject)) return false;
   if (norm(a.to) !== norm(b.to)) return false;
@@ -276,6 +286,35 @@ function sameItem(a, b) {
   const tb = Date.parse(b.at ?? "");
   if (!Number.isFinite(ta) || !Number.isFinite(tb)) return true;
   return Math.abs(ta - tb) < DEDUPE_WINDOW_MS;
+}
+
+// Mirrors the effect-significant inputs applyProposal() consumes in
+// web/calendar.mjs: the account and action it branches on, the fields payloadOf()
+// puts on the wire with its length limits, and the target event id, which is
+// read on the update path only. A create is sent as { account, payload } and
+// never carries an event id, so including one there would split two requests
+// that produce the same booking. A field added to payloadOf() must be added
+// here, or two different changes will look like one.
+//
+// `narrow` drops the two fields PENDING.md has no column for, so a logged line
+// and a chat card describing the same booking still compare equal.
+function effectOf(item, narrow) {
+  const text = (value, max) => (value ? String(value).slice(0, max) : null);
+  return JSON.stringify({
+    action: item.action ?? null,
+    account: item.account ?? null,
+    // The update path is the only one that sends this, so it decides identity
+    // only there.
+    eventId: item.action === "update" ? (item.eventId ?? null) : null,
+    summary: text(item.summary, 300),
+    from: item.from ?? null,
+    to: item.to ?? null,
+    location: narrow ? null : text(item.location, 300),
+    description: narrow ? null : text(item.description, 2000),
+    attendees: Array.isArray(item.attendees) && item.attendees.length
+      ? item.attendees.slice(0, 25).join(",")
+      : null,
+  });
 }
 
 function norm(value) {
@@ -286,7 +325,30 @@ function norm(value) {
     .trim();
 }
 
-export async function readQueue({ pendingPath, statePath }) {
+// Ordering has to be total. Two cards written in the same millisecond carry the
+// same timestamp, so ordering on time alone leaves their relative position free
+// to change between one response and the next, which at a page edge offers one
+// card twice and never offers the other.
+const orderAt = (item) => Date.parse(item.at ?? "") || 0;
+function byNewestThenId(a, b) {
+  return (orderAt(b) - orderAt(a)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+const cursorOf = (item) => `${item.at ?? ""}|${item.id}`;
+
+// Everything ordered strictly after the cursor. This compares sort position
+// rather than looking the card up, because the card the cursor names may have
+// been answered since it was issued; paging must not repeat or skip its
+// neighbours when the set shifts underneath the reader.
+function afterCursor(list, cursor) {
+  const raw = typeof cursor === "string" ? cursor : "";
+  const split = raw.indexOf("|");
+  if (split === -1) return list;
+  const mark = { at: raw.slice(0, split), id: raw.slice(split + 1) };
+  return list.filter((item) => byNewestThenId(mark, item) < 0);
+}
+
+export async function readQueue({ pendingPath, statePath, page = true, after = null }) {
   const [state, file] = await Promise.all([loadState(statePath), readPendingFile(pendingPath)]);
 
   const merged = state.observed.slice();
@@ -317,14 +379,22 @@ export async function readQueue({ pendingPath, statePath }) {
     });
   }
 
-  pending.sort((a, b) => (Date.parse(b.at ?? "") || 0) - (Date.parse(a.at ?? "") || 0));
+  pending.sort(byNewestThenId);
   recent.sort((a, b) => (Date.parse(b.decidedAt ?? "") || 0) - (Date.parse(a.decidedAt ?? "") || 0));
+
+  const remaining = page ? afterCursor(pending, after) : pending;
+  const shown = page ? remaining.slice(0, PENDING_MAX * 2) : remaining;
+  const more = shown.length < remaining.length;
 
   return {
     state: "ok",
     storeReadable: true,
     sources: { pendingFile: file.present },
-    pending: pending.slice(0, PENDING_MAX * 2),
+    // `page` bounds one response. `after` walks past that bound, so the bound
+    // keeps a single response small without putting any counted card out of
+    // reach. Callers acting on a card pass page:false and see the whole set.
+    pending: shown,
+    nextCursor: more ? cursorOf(shown[shown.length - 1]) : null,
     counts: { pending: pending.length, events, approved, discarded },
     recent: recent.slice(0, 8).map((item) => ({
       id: item.id,
@@ -360,7 +430,7 @@ export function decide({ pendingPath, statePath, id, decision, execute }) {
     throw new QueueRefused("A card is approved or discarded; there is no third answer.");
   }
   return serialise(async () => {
-    const current = await readQueue({ pendingPath, statePath });
+    const current = await readQueue({ pendingPath, statePath, page: false });
     const item = current.pending.find((candidate) => candidate.id === id);
     if (!item) {
       // Either it was decided in another tab, or it never existed. Both are the
@@ -474,7 +544,18 @@ export function observeProposal({ statePath, card, desk }) {
 
 function prune(state) {
   if (state.observed.length > OBSERVED_MAX) {
-    state.observed = state.observed.slice(-OBSERVED_MAX);
+    // Release answered cards first; age only breaks ties among those. A card
+    // seen in chat carries its own draft text and has no PENDING.md line
+    // behind it, so dropping an unanswered one loses it entirely.
+    const overflow = state.observed.length - OBSERVED_MAX;
+    const answered = state.observed.filter((item) => state.decisions[item.id]);
+    if (answered.length) {
+      const release = new Set(answered.slice(0, Math.min(overflow, answered.length)).map((i) => i.id));
+      state.observed = state.observed.filter((item) => !release.has(item.id));
+    }
+    if (state.observed.length > OBSERVED_MAX) {
+      state.observed = state.observed.slice(-OBSERVED_MAX);
+    }
   }
   const ids = Object.keys(state.decisions);
   if (ids.length > DECISIONS_MAX) {

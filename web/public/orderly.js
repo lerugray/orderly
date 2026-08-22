@@ -1522,9 +1522,49 @@ function drawQueueRecent(recent) {
   }
 }
 
-function drawQueue(payload) {
+// How far the operator has paged, and the cursor the last response ended on.
+// `queuePages` survives a refresh so the 45 second poll cannot collapse an
+// expanded queue back to the first page under them.
+let queuePages = 1;
+let queueCursor = null;
+let queueShown = 0;
+
+function buildQueueMore(remaining) {
+  const wrap = document.createElement("div");
+  wrap.className = "queue-more";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost";
+  button.textContent = remaining > 0 ? `Load ${remaining} more` : "Load more";
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    queuePages += 1;
+    loadMoreQueue();
+  });
+  wrap.appendChild(button);
+  return wrap;
+}
+
+async function loadMoreQueue() {
+  if (!queueCursor) return;
+  try {
+    const res = await fetch(`/api/queue?after=${encodeURIComponent(queueCursor)}`, { cache: "no-store" });
+    drawQueue(await res.json(), true);
+  } catch {
+    queueWhen.textContent = "couldn't read";
+    queueNote.textContent = "Couldn't reach the station to read the rest of the queue.";
+  }
+}
+
+function drawQueue(payload, append = false) {
   if (!queueStack) return;
-  queueStack.textContent = "";
+  if (append) {
+    const more = queueStack.querySelector(".queue-more");
+    if (more) more.remove();
+  } else {
+    queueStack.textContent = "";
+    queueShown = 0;
+  }
 
   if (payload?.state === "error") {
     queueNote.textContent = payload.error || "The queue couldn't be read on the station.";
@@ -1535,15 +1575,24 @@ function drawQueue(payload) {
   queueCanWrite = payload?.calendarWrite !== false;
   const pending = Array.isArray(payload?.pending) ? payload.pending : [];
   for (const item of pending) queueStack.appendChild(buildQueueCard(item));
-  drawQueueRecent(payload?.recent);
+  queueShown += pending.length;
+  queueCursor = payload?.nextCursor ?? null;
+  if (!append) drawQueueRecent(payload?.recent);
 
   const counts = payload?.counts || {};
   const decided = (counts.approved || 0) + (counts.discarded || 0);
-  if (pending.length) {
+  if (queueShown) {
     queueNote.textContent = QUEUE_NOTE;
+    // The count is what is waiting. What this response carried is a separate
+    // fact, and saying only the second one hides the rest of the backlog.
+    const waiting = Number.isInteger(counts.pending) ? counts.pending : queueShown;
+    const head = queueShown < waiting
+      ? `${waiting} waiting · ${queueShown} shown`
+      : `${waiting} waiting`;
     queueWhen.textContent = counts.events
-      ? `${pending.length} waiting · ${counts.events} would change your calendar`
-      : `${pending.length} waiting`;
+      ? `${head} · ${counts.events} would change your calendar`
+      : head;
+    if (queueCursor) queueStack.appendChild(buildQueueMore(waiting - queueShown));
   } else {
     queueNote.textContent = decided
       ? "Nothing waiting. New drafts land here as he writes them — from a routine, or from something you asked for."
@@ -1558,7 +1607,14 @@ async function checkQueue() {
   if (!queueStack) return;
   try {
     const res = await fetch("/api/queue", { cache: "no-store" });
-    drawQueue(await res.json());
+    let payload = await res.json();
+    drawQueue(payload);
+    for (let page = 1; page < queuePages && payload?.nextCursor; page += 1) {
+      const next = await fetch(`/api/queue?after=${encodeURIComponent(payload.nextCursor)}`,
+        { cache: "no-store" });
+      payload = await next.json();
+      drawQueue(payload, true);
+    }
   } catch {
     queueWhen.textContent = "couldn't read";
     queueNote.textContent = "Couldn't reach the station to read the queue.";

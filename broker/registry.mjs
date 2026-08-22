@@ -69,8 +69,18 @@ export class LaneRegistry {
     // separate lanes concurrently without allowing an older snapshot to land
     // after a newer one.
     const snapshot = structuredClone(this.data);
-    this.writeChain = this.writeChain.then(() => atomicWriteJson(this.path, snapshot));
-    return this.writeChain;
+    // The chain orders writes; it must not carry their outcome forward. A plain
+    // .then() stays rejected after one failure, so every later save skips the
+    // write while memory keeps advancing. Each caller still gets its own result.
+    const next = this.writeChain.then(
+      () => atomicWriteJson(this.path, snapshot),
+      () => atomicWriteJson(this.path, snapshot),
+    );
+    this.writeChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
   laneDir(id) {

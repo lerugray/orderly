@@ -177,11 +177,11 @@ export function parseSeatProposal(output) {
   return proposal;
 }
 
-function failure(code) {
+function failure(code, message = "seat unavailable — fail closed") {
   return {
     seat_failure: {
       code,
-      message: "seat unavailable — fail closed",
+      message,
     },
   };
 }
@@ -235,10 +235,26 @@ export class SeatInvoker {
   async consult({ ask, allowlist, laneRegistry }) {
     let temporary;
     try {
-      const [standingOrders, schema] = await Promise.all([
-        readFile(this.ordersPath, "utf8"),
-        readFile(this.schemaPath, "utf8"),
-      ]);
+      // Read each input on its own so the diagnosis comes from the read that
+      // actually failed. Acquiring both together and then re-checking the
+      // filesystem to work out which one it was would let the world change in
+      // between and name the wrong input.
+      //
+      // The message names WHICH input, never its path: these are operator
+      // configurable and may be absolute, and an API response is not the place
+      // to publish host filesystem layout.
+      let standingOrders;
+      let schema;
+      try {
+        standingOrders = await readFile(this.ordersPath, "utf8");
+      } catch {
+        return failure("seat_input_unreadable", "seat standing orders unreadable — fail closed");
+      }
+      try {
+        schema = await readFile(this.schemaPath, "utf8");
+      } catch {
+        return failure("seat_input_unreadable", "seat packet schema unreadable — fail closed");
+      }
       const statePacket = buildStatePacket({ ask, allowlist, laneRegistry, standingOrders });
       const prompt = buildSeatPrompt({ statePacket, schema });
       temporary = await mkdtemp(join(tmpdir(), "orderly-seat-"));
