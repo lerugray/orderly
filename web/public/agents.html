@@ -46,8 +46,8 @@
         <h2 class="label">Name a new one</h2>
         <p class="block__intro" id="make-intro">
           A named agent is a separate conversation and a separate transcript, kept on the station
-          so it survives a restart and a cleared browser. It is not a separate sandbox yet — read
-          the note at the foot of this page before you rely on one for anything private.
+          so it survives a restart and a cleared browser. Each one is configured for its own
+          zero-network container and stays pending until that live container passes every check.
         </p>
         <form class="fields" id="make-form">
           <label class="field field--stack">
@@ -147,15 +147,12 @@
             that turns it on.
           </p>
         </div>
-        <div class="note note--warn">
+        <div class="note note--hard">
           <p>
-            <strong>It does not have a sealed container of its own yet.</strong> Its conversation and
-            its transcript are genuinely separate, and it is told plainly that it may not delegate —
-            but that last part is an instruction, not a wall, because the seat answering it is still
-            the coordinator's. Until each identity gets its own sandbox and passes the container
-            checks, treat a named agent as a separate <em>conversation</em>, not a separate
-            <em>confinement</em>. The checks that have run are listed against each one below; the
-            ones still owed are listed beside them.
+            <strong>Container status is per agent.</strong> An identity marked on duty has its own
+            <code>named-isolated</code> sandbox and a complete live verification record. Pending or
+            failed checks keep that identity off duty. Each row shows every required check and
+            whether it passed or is still owed.
           </p>
         </div>
       </section>

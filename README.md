@@ -19,10 +19,11 @@ ORDERLY is a self-hosted private AI agent station for one operator who is willin
 - Proposes calendar creates and updates. A separate host-side credential performs the write only after approval. There is no calendar-delete path, and failed writes remain pending.
 - Keeps coordinator-owned reminders and tasks, delivers owner-gated timed reminders, and sends a daily briefing with inbox, calendar, and due items. If one part fails, the briefing identifies the missing part and sends the rest.
 - Researches the web through the gateway's guarded fetch and returns current links without giving the researcher's container network access.
-- Gives only the coordinator persistent memory. The mail and research agents remain memoryless. A voice profile can be built from sent mail, reviewed by the operator, and installed separately as an immutable drafting rule.
+- Gives the coordinator persistent memory and lets operator-created identities choose persistent or memoryless storage. Each persistent identity can write only its own memory; mail and research remain memoryless. A voice profile can be built from sent mail, reviewed by the operator, and installed separately as an immutable drafting rule.
 - Includes an orchestrator desk that turns a request into a bounded coding brief, dispatches it to an external agent lane, watches terminal state, and reports the result. ORDERLY does not edit, commit, merge, or verify that code for the operator.
 - Keeps reply style as station-owned prompt data: ten plain-language presets, optional per-agent refinements, and no route from the text to tools, credentials, approvals, or memory.
 - Provides a per-agent connector framework with a compiled catalog, one account per instance, reviewed operation attachments, fixed HTTP-over-Unix-socket calls, probe-gated activation, and route-first suspend/resume/detach. Catalog entries alone install nothing, and no provider adapter ships as active by implication.
+- Runs every operator-created named identity in its own zero-network Docker sandbox and keeps it pending until the complete live-container check set passes.
 
 ## Security posture
 
@@ -30,7 +31,7 @@ ORDERLY assumes email and web pages will eventually contain hostile instructions
 
 - The gateway and front door bind to loopback. Tailscale Serve publishes them only on the operator's tailnet, with an SSH tunnel as fallback. The setup does not use Tailscale Funnel or expose a public endpoint.
 - The bot answers one allowlisted operator. Scheduling belongs to one named identity on one chat channel; the front door holds a gateway bearer but is not that identity by design and cannot create scheduled jobs.
-- Each agent runs in its own container with a read-only root filesystem, no privileges, and no network by default. Only the mail agent has provider egress. The coordinator alone gets a writable mount, limited to its own workspace, so its notes persist.
+- Each agent runs in its own container with a read-only root filesystem, no privileges, and no network by default. Only the mail agent has provider egress. The coordinator retains its existing workspace; a persistent named identity gets one writable mount limited to its own memory, while a memoryless identity gets none.
 - Credentials are split by connector and capability rather than exposing a keyring. The agent-visible mail store holds mail read, draft creation, and calendar read access. Calendar write uses a different store that no agent container mounts and a host-side path invoked only after operator approval.
 - The mail path has an explicit limit. Normal commands refuse sending and the installed accounts have no separate send scope, but the CLI default can be overridden and the provider's draft permission is documented as also covering send. Draft-only authority is therefore not a complete structural wall; the last defense is still the model following its standing orders. The front door itself has no credential that can send.
 - The researcher and coordinator have no container egress. Research runs through guarded fetch outside the sandbox, and fetched text is treated as data, not instructions. The full browser tool remains denied.
@@ -41,7 +42,7 @@ ORDERLY assumes email and web pages will eventually contain hostile instructions
 
 ## Install
 
-You need an always-on Linux host, a current Node.js runtime, Docker or Podman for agent sandboxes, [OpenClaw](https://github.com/openclaw/openclaw), one supported chat channel, Tailscale, and a model-provider credential. Start with [`web/deploy/install.sh`](web/deploy/install.sh) and the public [`docs/`](docs/). Any model provider supported by OpenClaw can be selected in configuration.
+You need an always-on Linux host, a current Node.js runtime, Docker or Podman for agent sandboxes, [OpenClaw](https://github.com/openclaw/openclaw), one supported chat channel, Tailscale, and a model-provider credential. Install the front door with [`web/deploy/install.sh`](web/deploy/install.sh); the gateway-side named-agent controller source lives under `agents/`, and the public [`docs/`](docs/) cover the rest. Any model provider supported by OpenClaw can be selected in configuration.
 
 The public repository contains the broker, front door, interface and feature specifications, and tests. Deployment configuration, standing orders, security review records, and other installation-specific material belong in a private sibling repository because they describe and expose one particular station.
 

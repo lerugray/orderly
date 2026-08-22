@@ -34,6 +34,7 @@ DOCS_SET="${ORDERLY_OPENCLAW_DOCS+x}"
 ENV_FILES_SET="${ORDERLY_ENV_FILES+x}"
 BROKER_SOCKET_SET="${ORDERLY_BROKER_SOCKET+x}"
 CALENDAR_SOCKET_SET="${ORDERLY_CALENDAR_SOCKET+x}"
+AGENT_RUNTIME_SOCKET_SET="${ORDERLY_AGENT_RUNTIME_SOCKET+x}"
 CONNECTORS_CONFIG_SET="${ORDERLY_CONNECTORS_CONFIG+x}"
 REPLY_STYLE_CONFIG_SET="${ORDERLY_REPLY_STYLE_CONFIG+x}"
 
@@ -285,6 +286,18 @@ else
   fi
 fi
 
+if [ "$AGENT_RUNTIME_SOCKET_SET" = x ]; then
+  AGENT_RUNTIME_SOCKET="$ORDERLY_AGENT_RUNTIME_SOCKET"
+else
+  AGENT_RUNTIME_SOCKET="$(unit_environment ORDERLY_AGENT_RUNTIME_SOCKET "$PROPOSED_UNIT")"
+  AGENT_RUNTIME_SOCKET="${AGENT_RUNTIME_SOCKET:-/run/orderly-agents/runtime.sock}"
+fi
+case "$AGENT_RUNTIME_SOCKET" in /*) ;; *) echo "ORDERLY_AGENT_RUNTIME_SOCKET must be absolute." >&2; exit 1 ;; esac
+set_unit_environment ORDERLY_AGENT_RUNTIME_SOCKET "$AGENT_RUNTIME_SOCKET" 0
+# v0.4 owned this tree in the web service. v0.4.1 deliberately removes the
+# variable even on an in-place unit upgrade; the rollback copy stays on disk.
+set_unit_environment ORDERLY_AGENTS_ROOT "" 1
+
 if [ "$CONNECTORS_CONFIG_SET" = x ]; then
   CONNECTORS_CONFIG="$ORDERLY_CONNECTORS_CONFIG"
 else
@@ -302,7 +315,7 @@ case "$REPLY_STYLE_CONFIG" in /*) ;; *) echo "ORDERLY_REPLY_STYLE_CONFIG must be
 set_unit_environment ORDERLY_CONNECTORS_CONFIG "$CONNECTORS_CONFIG" 0
 set_unit_environment ORDERLY_REPLY_STYLE_CONFIG "$REPLY_STYLE_CONFIG" 0
 
-APP_FILES="server.mjs settings.mjs queue.mjs calendar.mjs dashboard.mjs agents.mjs engines.mjs reply-style.mjs connectors.mjs"
+APP_FILES="server.mjs settings.mjs queue.mjs calendar.mjs dashboard.mjs agents.mjs agent-runtime-client.mjs engines.mjs reply-style.mjs connectors.mjs"
 CONNECTOR_FILES="catalog.mjs control.mjs connectorctl.mjs client.mjs service.mjs probes.mjs runtime.mjs"
 
 if [ "$DRY_RUN" -eq 1 ]; then

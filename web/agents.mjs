@@ -1,10 +1,11 @@
-// ORDERLY — named persistent agents, milestone 1: the identity store.
+// ORDERLY — named persistent agents: gateway-owned identity store.
 //
 // Grounded in docs/SPEC-NAMED-AGENTS-FUGU-2026-08-21.md (ratified). This module
-// owns §1's record and on-disk layout, §4's persistence, and the half of §5 that
-// is not a browser. It deliberately does NOT own §2 (per-agent Docker sandboxes),
-// §3.3 (mentions), §3.4 (group agents) or the Telegram attachment — those are the
-// spec's own deferrals and the milestones after this one.
+// owns §1's record and on-disk layout, §4's persistence, and the durable half of
+// §5. The gateway-side runtime in ../agents/ owns §2's Docker lifecycle and is
+// the only caller allowed to record live-container verification. orderly-web
+// receives the sanitised projection exported here; it does not receive this
+// module's authoritative record on an installed station.
 //
 // The one property this file exists to make STRUCTURAL rather than promised:
 //
@@ -29,13 +30,9 @@
 //      secret-shaped string, a non-empty capability or delegation list, or a
 //      channel binding other than the web desk all refuse the whole write.
 //
-// Where the store lives is the deployment's business, not this module's: every
-// entry point takes a `root`. See web/server.mjs for how the front door resolves
-// it and LANE-REPORT-NAMEDAGENTS-M1.md for why M1's root is the desk's own host
-// state rather than §1.1's gateway-owned path — in one line, because M1 creates
-// no sandbox and grants no capability, so there is no security-defining field
-// for the gateway to be the owner OF, and the front door cannot write into an
-// identity it is deliberately not.
+// Where the store lives is supplied by the gateway runtime: production uses
+// a gateway-owned private state root, while tests pass isolated roots. The web service
+// never receives that path and reaches only the sanitized Unix-socket API.
 //
 // The LAYOUT under that root is the spec's, exactly:
 //
@@ -83,6 +80,25 @@ const TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024;
 const TRANSCRIPT_KEEP_TURNS = 400;
 const TRANSCRIPT_READ_MAX = 200;
 const AUDIT_MAX_BYTES = 512 * 1024;
+
+export const CONTAINER_PROBES = Object.freeze([
+  Object.freeze({ id: "network-none", label: "No direct network reachability" }),
+  Object.freeze({ id: "credential-stores-absent", label: "No credential store is visible" }),
+  Object.freeze({ id: "other-agent-state-absent", label: "No other agent memory or transcript is visible" }),
+  Object.freeze({ id: "own-memory-policy", label: "Persistent writes match this agent's memory policy" }),
+  Object.freeze({ id: "standing-orders-read-only", label: "Standing orders cannot be modified" }),
+  Object.freeze({ id: "profile-read-only", label: "The agent profile cannot be modified" }),
+  Object.freeze({ id: "typed-sockets-only", label: "Only approved typed sockets are visible" }),
+]);
+
+function owedVerification() {
+  return {
+    status: "owed",
+    checkedAt: null,
+    revision: null,
+    checks: CONTAINER_PROBES.map(({ id, label }) => ({ id, label, status: "owed" })),
+  };
+}
 
 // The fixed trio and the words the station already uses for itself. A named
 // agent called "mail" would not GET the mail profile — §2.1 is explicit that
@@ -246,7 +262,19 @@ export async function readManifest(root) {
   }
   const agents = (Array.isArray(parsed?.agents) ? parsed.agents : [])
     .filter((record) => AGENT_ID.test(String(record?.id)) && AGENT_HANDLE.test(String(record?.handle)))
-    .slice(0, AGENTS_MAX);
+    .slice(0, AGENTS_MAX)
+    .map((record) => {
+      const next = structuredClone(record);
+      next.runtimeProfile = "named-isolated";
+      next.containerVerification = normaliseVerification(record.containerVerification);
+      // v0.4 could mark a record active after host-tree checks while explicitly
+      // deferring every container check. Such a record is pending on read in
+      // v0.4.1; no rewrite or operator edit is required, and it cannot route.
+      if (next.lifecycle === "active" && next.containerVerification.status !== "passed") {
+        next.lifecycle = "pending";
+      }
+      return next;
+    });
   const tombstones = (Array.isArray(parsed?.tombstones) ? parsed.tombstones : [])
     .filter((stone) => AGENT_HANDLE.test(String(stone?.handle)))
     .slice(-200);
@@ -297,14 +325,13 @@ function buildRecord({ id, name, handle, description, memoryPolicy, at }) {
     avatarRef: null,
     createdAt: at,
     updatedAt: at,
-    // §5.2: the first confirmation creates a PENDING identity, and activation
-    // waits on probes run from inside a real container. M1 builds no container,
-    // so nothing here may claim to have passed them.
+    // §5.2: the first confirmation creates a PENDING identity. The gateway
+    // runtime provisions the derived profile and records live checks before it
+    // can change this word.
     lifecycle: "pending",
     agentClass: "named",
-    // §2.1's `named-isolated` profile arrives with the sandbox milestone. Null
-    // is the honest value: this identity has no sandbox of its own yet.
-    runtimeProfile: null,
+    runtimeProfile: "named-isolated",
+    containerVerification: owedVerification(),
     memoryPolicy,
     canonicalConversationId: newConversationId(),
     policyRef: "standing-orders.md",
@@ -334,6 +361,14 @@ function buildRecord({ id, name, handle, description, memoryPolicy, at }) {
 // descriptions, lifecycle and non-secret labels. No filesystem path, no profile,
 // no policy body, and nothing about where any of it is stored.
 export function sanitise(record) {
+  const verification = normaliseVerification(record.containerVerification);
+  const containerState = ["suspended", "retired"].includes(record.lifecycle)
+    ? "stopped"
+    : verification.status === "passed"
+      ? "verified"
+      : verification.status === "failed"
+        ? "failed"
+        : "pending";
   return {
     id: record.id,
     name: record.name,
@@ -348,8 +383,33 @@ export function sanitise(record) {
     updatedAt: record.updatedAt,
     capabilities: [],
     delegation: [],
-    channels: record.channelBindings.map((binding) => binding.channel),
-    sandbox: { provisioned: record.runtimeProfile !== null, profile: record.runtimeProfile },
+    channels: (record.channelBindings ?? []).map((binding) => binding.channel),
+    sandbox: {
+      provisioned: verification.status === "passed",
+      profile: record.runtimeProfile ?? "named-isolated",
+      state: containerState,
+      verification,
+    },
+  };
+}
+
+function normaliseVerification(value) {
+  const byId = new Map(
+    (Array.isArray(value?.checks) ? value.checks : [])
+      .filter((check) => check && typeof check.id === "string")
+      .map((check) => [check.id, check]),
+  );
+  const checks = CONTAINER_PROBES.map(({ id, label }) => {
+    const status = byId.get(id)?.status;
+    return { id, label, status: ["passed", "failed"].includes(status) ? status : "owed" };
+  });
+  const allPassed = checks.every((check) => check.status === "passed");
+  const anyFailed = checks.some((check) => check.status === "failed");
+  return {
+    status: allPassed ? "passed" : anyFailed ? "failed" : "owed",
+    checkedAt: typeof value?.checkedAt === "string" ? value.checkedAt : null,
+    revision: typeof value?.revision === "string" ? value.revision : null,
+    checks,
   };
 }
 
@@ -395,6 +455,10 @@ async function layOutDirectory(root, record) {
   await mkdir(join(dir, "audit"), { recursive: true, mode: 0o700 });
   if (record.memoryPolicy === "persistent") {
     await mkdir(join(dir, "memory", "notes"), { recursive: true, mode: 0o700 });
+    // Docker otherwise creates these nested overlay mountpoints as root when
+    // OpenClaw exposes its generated read-only skill view. Pre-creating them
+    // keeps the complete agent directory removable by the gateway owner.
+    await mkdir(join(dir, "memory", ".openclaw", "sandbox-skills", "skills"), { recursive: true, mode: 0o700 });
     const memory = join(dir, "memory", "MEMORY.md");
     try {
       await stat(memory);
@@ -604,24 +668,17 @@ export function updateAgent({ root, id, fields }) {
 // §5.2 / §2.4 — activation is probed, never asserted
 // ---------------------------------------------------------------------------
 //
-// The spec is emphatic that "configuration alone is not evidence": an identity
-// becomes active only after probes run against the real thing. §2.4's probe list
-// is written for a live container, and this milestone builds no container — so
-// what runs here is the subset that is REAL for what M1 actually laid down, and
-// the container half is reported by name as NOT YET RUN rather than quietly
-// counted as passed. An operator reading this list should be able to see the
-// difference between what was checked and what is still owed.
+// `probeAgent` remains the host-tree preflight used by the gateway runtime. It
+// cannot activate an identity. The only activation write is
+// `recordContainerVerification`, which accepts the fixed result set emitted by
+// ../agents/probes.mjs after docker exec has run inside the resolved OpenClaw
+// sandbox. The browser has no envelope that can supply this evidence.
 
 const CREDENTIAL_FILENAMES =
   /(^|\.)(env|netrc|npmrc|pem|key|p12|pfx|kdbx|jks|keystore)$|^(credentials?|token|secrets?|id_rsa|id_ed25519|\.git-credentials)$/i;
 
 export const DEFERRED_PROBES = [
-  "no direct network reachability from inside the container",
-  "no credential store visible from inside the container",
-  "no other identity's memory or transcript visible from inside the container",
-  "writes succeed only to this identity's own memory",
-  "standing orders and profile are unmodifiable from inside the container",
-  "only explicitly approved typed sockets are visible",
+  ...CONTAINER_PROBES.map((probe) => probe.label),
 ];
 
 async function walkFiles(dir, out = [], depth = 0) {
@@ -700,17 +757,18 @@ export async function probeAgent({ root, record }) {
   );
 
   add(
-    "no sandbox, no network and no delegation to grant",
-    record.runtimeProfile === null &&
+    "only the named-isolated zero-capability profile is selected",
+    record.runtimeProfile === "named-isolated" &&
       record.capabilityBindings.length === 0 &&
       record.delegationAllowlist.length === 0,
-    "this identity holds nothing to probe a boundary against",
+    "the live container still has to prove the compiled profile",
   );
 
   return { passed: checks.every((entry) => entry.ok), checks, deferred: DEFERRED_PROBES };
 }
 
-// §5.2's second half: activation, and only on a clean probe run.
+// Kept as a compatibility entry point for callers from v0.4. It now performs
+// the host-tree preflight and refuses activation while the live checks are owed.
 export function activateAgent({ root, id }) {
   return serialise(async () => {
     const manifest = await readManifest(root);
@@ -723,12 +781,117 @@ export function activateAgent({ root, id }) {
       const failed = probe.checks.filter((entry) => !entry.ok).map((entry) => entry.check);
       refuse(`Refused: ${failed.join("; ")}. Nothing was activated.`);
     }
-    record.lifecycle = "active";
+    refuse(
+      `Container checks are still owed: ${DEFERRED_PROBES.join("; ")}. The gateway runtime must run them inside this agent's live sandbox.`,
+    );
+  });
+}
+
+const PROBE_REVISION = /^[A-Za-z0-9._:-]{1,96}$/;
+
+function checkedContainerEvidence(evidence) {
+  if (!isObj(evidence)) refuse("The container verification record is malformed.");
+  for (const key of Object.keys(evidence)) {
+    if (!["revision", "checkedAt", "container", "checks"].includes(key)) {
+      refuse(`Unknown container verification field "${key}".`);
+    }
+  }
+  if (typeof evidence.revision !== "string" || !PROBE_REVISION.test(evidence.revision)) {
+    refuse("The container verification revision is malformed.");
+  }
+  if (typeof evidence.checkedAt !== "string" || !Number.isFinite(Date.parse(evidence.checkedAt))) {
+    refuse("The container verification time is malformed.");
+  }
+  if (typeof evidence.container !== "string" || !/^openclaw-sbx-agent-a-[a-z0-9-]{8,80}$/.test(evidence.container)) {
+    refuse("The verification does not identify a derived named-agent sandbox.");
+  }
+  if (!Array.isArray(evidence.checks) || evidence.checks.length !== CONTAINER_PROBES.length) {
+    refuse("The container verification record does not contain the complete check set.");
+  }
+  const expected = new Set(CONTAINER_PROBES.map((check) => check.id));
+  const seen = new Set();
+  const checks = [];
+  for (const check of evidence.checks) {
+    if (!isObj(check)) refuse("A container verification check is malformed.");
+    for (const key of Object.keys(check)) {
+      if (!["id", "ok", "detail"].includes(key)) refuse(`Unknown container check field "${key}".`);
+    }
+    if (!expected.has(check.id) || seen.has(check.id)) refuse("The container verification check set is not exact.");
+    if (typeof check.ok !== "boolean") refuse(`Container check "${check.id}" has no boolean result.`);
+    if (typeof check.detail !== "string" || check.detail.length > 600 || /[\u0000-\u001f\u007f]/.test(check.detail)) {
+      refuse(`Container check "${check.id}" has malformed detail.`);
+    }
+    seen.add(check.id);
+    checks.push({ id: check.id, ok: check.ok, detail: check.detail });
+  }
+  if (seen.size !== expected.size) refuse("The container verification check set is incomplete.");
+  return { ...evidence, checks };
+}
+
+export function recordContainerVerification({ root, id, evidence }) {
+  return serialise(async () => {
+    const checked = checkedContainerEvidence(evidence);
+    const manifest = await readManifest(root);
+    const record = manifest.agents.find((entry) => entry.id === id);
+    if (!record) refuse("That isn't an agent on this station.");
+    if (record.lifecycle === "retired") refuse("A retired identity is not activated again.");
+    if (!checked.container.includes(`-agent-${record.id}-`)) {
+      refuse("The verification record belongs to a different sandbox.");
+    }
+    const host = await probeAgent({ root, record });
+    if (!host.passed) {
+      const failed = host.checks.filter((entry) => !entry.ok).map((entry) => entry.check);
+      refuse(`Host preflight failed: ${failed.join("; ")}. Nothing was activated.`);
+    }
+
+    const labels = new Map(CONTAINER_PROBES.map((check) => [check.id, check.label]));
+    record.containerVerification = {
+      status: checked.checks.every((check) => check.ok) ? "passed" : "failed",
+      checkedAt: checked.checkedAt,
+      revision: checked.revision,
+      checks: checked.checks.map((check) => ({
+        id: check.id,
+        label: labels.get(check.id),
+        status: check.ok ? "passed" : "failed",
+      })),
+    };
+    record.runtimeProfile = "named-isolated";
+    record.lifecycle = record.containerVerification.status === "passed" ? "active" : "pending";
+    record.updatedAt = new Date().toISOString();
+
+    const probeDir = join(agentDir(root, id), "audit", "probes");
+    await mkdir(probeDir, { recursive: true, mode: 0o700 });
+    const stamp = checked.checkedAt.replace(/[^0-9A-Za-z.-]/g, "-");
+    await writeFile(join(probeDir, `${stamp}.json`), `${JSON.stringify(checked, null, 2)}\n`, { mode: 0o600 });
+    await writeProfile(root, record);
+    await writeManifest(root, manifest);
+    await audit(root, record.id, record.lifecycle === "active" ? "activated" : "verification-failed", {
+      revision: checked.revision,
+      passed: checked.checks.filter((check) => check.ok).length,
+      total: checked.checks.length,
+    });
+    if (record.lifecycle !== "active") {
+      const failed = checked.checks.filter((check) => !check.ok).map((check) => labels.get(check.id));
+      refuse(`Container verification did not pass: ${failed.join("; ")}. Nothing was activated.`);
+    }
+    return { agent: sanitise(record), probe: record.containerVerification };
+  });
+}
+
+export function resetContainerVerification({ root, id, lifecycle = "pending" }) {
+  if (!["pending", "suspended", "retired"].includes(lifecycle)) refuse("A reset lifecycle must not activate an agent.");
+  return serialise(async () => {
+    const manifest = await readManifest(root);
+    const record = manifest.agents.find((entry) => entry.id === id);
+    if (!record) refuse("That isn't an agent on this station.");
+    record.containerVerification = owedVerification();
+    record.runtimeProfile = "named-isolated";
+    record.lifecycle = lifecycle;
     record.updatedAt = new Date().toISOString();
     await writeProfile(root, record);
     await writeManifest(root, manifest);
-    await audit(root, record.id, "activated", { checks: probe.checks.map((entry) => entry.check) });
-    return { agent: sanitise(record), probe };
+    await audit(root, record.id, "verification-reset", { lifecycle });
+    return sanitise(record);
   });
 }
 
@@ -738,6 +901,9 @@ export function activateAgent({ root, id }) {
 export function setLifecycle({ root, id, lifecycle }) {
   if (!LIFECYCLES.has(lifecycle)) refuse("That isn't a lifecycle this station has.");
   if (lifecycle === "pending") refuse("An identity cannot be put back to pending.");
+  if (lifecycle === "active") {
+    refuse("An identity becomes active only when the gateway runtime records a fresh live-container verification.");
+  }
   return serialise(async () => {
     const manifest = await readManifest(root);
     const record = manifest.agents.find((entry) => entry.id === id);
@@ -745,11 +911,6 @@ export function setLifecycle({ root, id, lifecycle }) {
     if (record.systemLocked) refuse("That identity's lifecycle is fixed by the station.");
     if (record.lifecycle === "retired") refuse("That identity is already retired.");
     if (record.lifecycle === lifecycle) refuse("Nothing changed.");
-    if (record.lifecycle === "pending" && lifecycle === "active") {
-      // Activation is probed, never declared. This verb is for suspending and
-      // resuming an identity that has already been through that gate.
-      refuse("A pending identity is activated by running its probes, not by setting a word.");
-    }
     record.lifecycle = lifecycle;
     record.updatedAt = new Date().toISOString();
     if (lifecycle === "retired") {

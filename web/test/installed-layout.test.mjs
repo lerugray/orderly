@@ -39,6 +39,7 @@ test("the install.sh flat layout serves every shipped identity and settings", as
     "calendar.mjs",
     "dashboard.mjs",
     "agents.mjs",
+    "agent-runtime-client.mjs",
     "engines.mjs",
     "reply-style.mjs",
     "connectors.mjs",
@@ -81,6 +82,7 @@ test("the install.sh flat layout serves every shipped identity and settings", as
   process.env.HOME = serviceHome;
   process.env.ORDERLY_SETTINGS_WRITE = "off";
   process.env.ORDERLY_AGENTS_ROOT = join(serviceHome, ".orderly", "agents");
+  process.env.ORDERLY_AGENT_RUNTIME_SOCKET = "off";
   delete process.env.ORDERLY_CONFIG;
   delete process.env.ORDERLY_CONNECTORS_CONFIG;
   delete process.env.ORDERLY_REPLY_STYLE_CONFIG;

@@ -27,9 +27,6 @@ el("bar-where").textContent =
 let roster = { system: [], agents: [], counts: { named: 0, active: 0, pending: 0 } };
 let connectorState = { state: "ok", catalog: [], instances: [], attachments: [], agents: [] };
 let busy = false;
-// The probe summaries §5.2 says the operator receives, kept per identity so the
-// page can show what was actually checked rather than the word "active".
-const probes = new Map();
 
 function state(text, kind) {
   const line = el("head-state");
@@ -135,12 +132,16 @@ function drawRow(list, agent) {
   add(facts, "span", "roster__fact", (agent.delegation || []).length
     ? `Delegates to: ${agent.delegation.join(", ")}`
     : "No delegation");
-  add(facts, "span", "roster__fact", agent.sandbox?.provisioned
-    ? `Sandbox: ${agent.sandbox.profile}`
-    : "No sandbox of its own");
+  add(
+    facts,
+    "span",
+    "roster__fact",
+    `Container: ${agent.sandbox?.profile || "named-isolated"} · ${agent.sandbox?.state || "pending"}`,
+  );
 
-  const probe = probes.get(agent.id);
-  if (probe) drawProbe(row, probe);
+  if (agent.agentClass !== "system" && agent.sandbox?.verification) {
+    drawProbe(row, agent.sandbox.verification);
+  }
 
   if (agent.agentClass === "system") {
     add(row, "p", "roster__note", "The station's own identity. Its name, purpose and privileges are fixed here.");
@@ -151,15 +152,14 @@ function drawRow(list, agent) {
 
   if (agent.lifecycle === "pending") {
     act(acts, "Run its checks", async () => {
-      const result = await ask({ action: "activate", id: agent.id });
-      probes.set(agent.id, result.probe);
+      await ask({ action: "activate", id: agent.id });
     });
   }
   if (agent.lifecycle === "active") {
     act(acts, "Suspend", () => ask({ action: "lifecycle", id: agent.id, lifecycle: "suspended" }));
   }
   if (agent.lifecycle === "suspended") {
-    act(acts, "Resume", () => ask({ action: "lifecycle", id: agent.id, lifecycle: "active" }));
+    act(acts, "Resume and recheck", () => ask({ action: "activate", id: agent.id }));
   }
   if (agent.lifecycle !== "retired") {
     act(acts, "Rename", () => rename(agent));
@@ -299,18 +299,21 @@ function drawConnectors() {
 // honest shape; "active" on its own would be a claim.
 function drawProbe(row, probe) {
   const panel = add(row, "div", "probe");
-  add(panel, "p", "probe__head", probe.passed ? "Checks passed" : "Checks failed");
+  const passed = (probe.checks || []).filter((check) => check.status === "passed").length;
+  const heading = probe.status === "passed"
+    ? "Container checks passed"
+    : probe.status === "failed"
+      ? "Container checks failed"
+      : "Container checks pending";
+  add(panel, "p", "probe__head", `${heading} · ${passed}/${(probe.checks || []).length}`);
   const ran = add(panel, "ul", "probe__list");
   for (const check of probe.checks || []) {
-    const item = add(ran, "li", check.ok ? "probe__ok" : "probe__no");
-    add(item, "span", "probe__what", check.check);
-    add(item, "span", "probe__detail", check.detail);
+    const className = check.status === "passed" ? "probe__ok" : check.status === "failed" ? "probe__no" : "probe__owed";
+    const item = add(ran, "li", className);
+    add(item, "span", "probe__what", check.label);
+    add(item, "span", "probe__detail", check.status);
   }
-  if ((probe.deferred || []).length) {
-    add(panel, "p", "probe__head", "Not run — these need a sandbox that does not exist yet");
-    const owed = add(panel, "ul", "probe__list");
-    for (const check of probe.deferred) add(owed, "li", "probe__owed", check);
-  }
+  if (probe.checkedAt) add(panel, "p", "roster__note", `Checked ${new Date(probe.checkedAt).toLocaleString()}`);
 }
 
 function act(parent, label, run) {
@@ -394,8 +397,9 @@ el("make-form").addEventListener("submit", async (event) => {
       "Delegation: none",
       "Capabilities: none",
       "Writable storage: its own notes on this station, and nothing else",
+      "Container: a separate named-isolated Docker sandbox",
       "",
-      "It starts pending. Its checks run when you ask, and it is not on duty until they pass.",
+      "It starts pending. Its checks run inside that live container, and it is not on duty until every one passes.",
     ].join("\n"),
   );
   if (!sure) return;

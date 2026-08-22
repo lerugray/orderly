@@ -71,6 +71,14 @@ import {
   updateAgent,
 } from "./agents.mjs";
 import {
+  AgentRuntimeClientRefused,
+  agentRuntimeAppend,
+  agentRuntimeFind,
+  agentRuntimeManage,
+  agentRuntimeRoster,
+  agentRuntimeTranscript,
+} from "./agent-runtime-client.mjs";
+import {
   HARNESSES,
   EngineRefused,
   applyEngineEdits,
@@ -166,10 +174,11 @@ const CODEXBAR_ENDPOINT = process.env.ORDERLY_CODEXBAR_ENDPOINT || DEFAULT_CODEX
 // this root is the spec's; see web/agents.mjs.
 const AGENTS_ROOT =
   process.env.ORDERLY_AGENTS_ROOT || join(process.env.HOME || "", ".orderly", "agents");
-// The upstream seat a named agent's thread is answered by, until the sandbox
-// milestone gives each identity one of its own. Named here rather than buried
-// so that swapping it is a deployment change, not a code change.
-const AGENT_SEAT = process.env.ORDERLY_AGENT_SEAT || "openclaw/coordinator";
+// Installed stations use the gateway-owned Unix-socket controller. `off` is a
+// test-only compatibility mode for the zero-dependency module tests; the unit
+// template never sets it.
+const AGENT_RUNTIME_SOCKET = process.env.ORDERLY_AGENT_RUNTIME_SOCKET || "/run/orderly-agents/runtime.sock";
+const LOCAL_AGENT_STORE = AGENT_RUNTIME_SOCKET === "off";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -459,6 +468,10 @@ export function agentSessionKey(id) {
   return `orderly-web:agent:${id}`;
 }
 
+export function agentUpstreamSession(agent) {
+  return agent?.memoryPolicy === "persistent" ? agentSessionKey(agent.id) : null;
+}
+
 // §4.1 and §2.2 as a preamble. Note what is NOT here: the card contract. A
 // named agent has no mailbox and no calendar, so inviting it to emit a draft or
 // an event proposal would put a card on the approval queue from an identity
@@ -480,6 +493,50 @@ export function agentSystemPrompt(agent, rendered = renderReplyStyle({}, agent.i
     "tagged orderly-card; that surface belongs to identities that can actually act.",
   ].join("\n");
   return appendReplyStylePrompt(base, rendered);
+}
+
+async function namedAgentList() {
+  if (LOCAL_AGENT_STORE) return listAgents({ root: AGENTS_ROOT });
+  return (await agentRuntimeRoster({ socketPath: AGENT_RUNTIME_SOCKET })).agents;
+}
+
+async function namedAgentFind(id) {
+  if (LOCAL_AGENT_STORE) {
+    const record = await findAgent({ root: AGENTS_ROOT, id });
+    if (!record) return null;
+    return (await listAgents({ root: AGENTS_ROOT })).find((agent) => agent.id === id) ?? null;
+  }
+  return agentRuntimeFind({ socketPath: AGENT_RUNTIME_SOCKET, id });
+}
+
+async function namedAgentManage(action, fields) {
+  if (!LOCAL_AGENT_STORE) return agentRuntimeManage({ socketPath: AGENT_RUNTIME_SOCKET, action, ...fields });
+  // This branch exists for isolated module tests only. In particular, local
+  // activation cannot manufacture the live-container evidence the gateway
+  // runtime owns, so activateAgent refuses while those checks are owed.
+  if (action === "create") return { ok: true, agent: await createAgent({ root: AGENTS_ROOT, fields: fields.fields }) };
+  if (action === "activate") return { ok: true, ...(await activateAgent({ root: AGENTS_ROOT, id: fields.id })) };
+  if (action === "update") return { ok: true, agent: await updateAgent({ root: AGENTS_ROOT, id: fields.id, fields: fields.fields }) };
+  if (action === "lifecycle") return { ok: true, agent: await setLifecycle({ root: AGENTS_ROOT, id: fields.id, lifecycle: fields.lifecycle }) };
+  return { ok: true, ...(await removeAgent({ root: AGENTS_ROOT, id: fields.id })) };
+}
+
+async function namedAgentTranscript(id) {
+  if (LOCAL_AGENT_STORE) return { turns: await readTranscript({ root: AGENTS_ROOT, id }) };
+  return agentRuntimeTranscript({ socketPath: AGENT_RUNTIME_SOCKET, id });
+}
+
+async function namedAgentAppend(id, turns) {
+  if (LOCAL_AGENT_STORE) return appendTurns({ root: AGENTS_ROOT, id, turns });
+  return agentRuntimeAppend({ socketPath: AGENT_RUNTIME_SOCKET, id, turns });
+}
+
+async function optionalNamedAgentIds() {
+  try { return (await namedAgentList()).map((agent) => agent.id); }
+  catch (error) {
+    if (error instanceof AgentRuntimeClientRefused) return [];
+    throw error;
+  }
 }
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -579,7 +636,7 @@ async function handleChat(req, res) {
   let named = null;
   if (typeof payload?.agent === "string" && payload.agent) {
     try {
-      named = await findAgent({ root: AGENTS_ROOT, id: payload.agent });
+      named = await namedAgentFind(payload.agent);
     } catch {
       named = null;
     }
@@ -599,17 +656,18 @@ async function handleChat(req, res) {
   const checked = sanitiseMessages(payload?.messages);
   if (checked.error) return jsonError(res, 400, checked.error);
   const wantsStream = payload?.stream !== false;
-  const thread = named ? agentSessionKey(named.id) : sessionKeyFor(desk, payload?.thread);
+  const thread = named
+    ? agentUpstreamSession(named)
+    : sessionKeyFor(desk, payload?.thread);
 
   // The tier gate, and the disclosure that rides with the answer. Ordinary chat
   // is inside every tier, so this refuses almost nothing — but it is where a
   // seat whose engine speaks no tool protocol, or whose classification is
   // broken, gets told so in words instead of being quietly asked anyway.
-  // A named agent declares a `seat` of its own but cannot fill it in this
-  // milestone, so it is gated and disclosed as what actually answers it: the
-  // coordinator's seat. When that field becomes settable the ref moves here and
-  // nothing else in this path changes.
-  const gate = await gateSeat(named ? AGENT_SEAT : DESKS[desk], "chat");
+  // The gateway routes the turn to the named OpenClaw agent id. Engine policy
+  // still resolves through the coordinator's inherited default classification;
+  // the runtime-owned manifest exposes no gateway config to this service.
+  const gate = await gateSeat(named ? DESKS.coordinator : DESKS[desk], "chat");
   if (!gate.allowed) return jsonError(res, 403, engineRefusalText(gate.refusal));
   discloseEngine(res, gate);
 
@@ -623,7 +681,7 @@ async function handleChat(req, res) {
     const configured = Array.isArray(gatewayConfig?.agents?.list)
       ? gatewayConfig.agents.list.map((agent) => agent?.id).filter((id) => typeof id === "string")
       : [];
-    const custom = (await listAgents({ root: AGENTS_ROOT })).map((agent) => agent.id);
+    const custom = (await namedAgentList()).map((agent) => agent.id);
     renderedStyle = renderReplyStyle(
       { orderly: { replyStyle: replyStyleRecord.replyStyle } },
       named?.id ?? desk,
@@ -635,7 +693,7 @@ async function handleChat(req, res) {
   }
 
   const upstreamBody = JSON.stringify({
-    model: named ? AGENT_SEAT : DESKS[desk],
+    model: named ? `openclaw/${named.id}` : DESKS[desk],
     stream: wantsStream,
     // With a session upstream the gateway already holds the conversation, so
     // only the new question crosses. Without one the page's own history is the
@@ -647,7 +705,7 @@ async function handleChat(req, res) {
           ? agentSystemPrompt(named, renderedStyle)
           : appendReplyStylePrompt(CARD_CONTRACT, renderedStyle),
       },
-      ...(thread ? checked.messages.slice(-1) : checked.messages),
+      ...(named || thread ? checked.messages.slice(-1) : checked.messages),
     ],
   });
 
@@ -658,7 +716,7 @@ async function handleChat(req, res) {
   const question = checked.messages[checked.messages.length - 1];
   const record = (turns) => {
     if (!named) return;
-    appendTurns({ root: AGENTS_ROOT, id: named.id, turns }).catch(() => {
+    namedAgentAppend(named.id, turns).catch(() => {
       // A transcript that cannot be written is reported by the thread endpoint,
       // not by breaking the conversation it was trying to remember.
     });
@@ -824,7 +882,7 @@ function fileDrafts(text, desk) {
 export const AGENT_ACTIONS = ["create", "activate", "update", "lifecycle", "remove"];
 
 export async function agentsRoster({ root, systemAgents }) {
-  const named = await listAgents({ root });
+  const named = LOCAL_AGENT_STORE ? await listAgents({ root }) : await namedAgentList();
   return {
     state: "ok",
     system: systemAgents,
@@ -848,7 +906,7 @@ async function handleAgentsGet(_req, res) {
       agents: [],
       counts: { named: 0, active: 0, pending: 0 },
       error:
-        err instanceof AgentsRefused
+        err instanceof AgentsRefused || err instanceof AgentRuntimeClientRefused
           ? err.message
           : "The agent roster couldn't be read on the station. Nothing was changed.",
     });
@@ -867,7 +925,7 @@ function connectorAgentProjection(agent) {
 async function findConnectorAgent(id) {
   const system = SYSTEM_AGENTS.find((agent) => agent.id === id);
   if (system) return connectorAgentProjection(system);
-  const named = await findAgent({ root: AGENTS_ROOT, id });
+  const named = await namedAgentFind(id);
   return named ? connectorAgentProjection(named) : null;
 }
 
@@ -966,6 +1024,16 @@ export async function handleAgentsPost(req, res) {
   if (!AGENT_ACTIONS.includes(action)) {
     return jsonError(res, 400, "That isn't something this page can do to an agent.");
   }
+  const allowed = action === "create"
+    ? ["action", "name", "description", "handle", "memoryPolicy"]
+    : action === "update"
+      ? ["action", "id", "name", "description", "handle"]
+      : action === "lifecycle"
+        ? ["action", "id", "lifecycle"]
+        : ["action", "id"];
+  for (const key of Object.keys(body)) {
+    if (!allowed.includes(key)) return jsonError(res, 400, `"${key}" is not part of an agent ${action} request.`);
+  }
 
   agentWriteInFlight = true;
   try {
@@ -977,16 +1045,14 @@ export async function handleAgentsPost(req, res) {
       // thing the typed-envelope guarantee is supposed to prevent.
       const fields = { ...body };
       delete fields.action;
-      const agent = await createAgent({ root: AGENTS_ROOT, fields });
+      const result = await namedAgentManage("create", { fields });
       return sendJson(res, 200, {
-        ok: true,
-        agent,
-        note: "Created, and pending. It holds no credential, no network and no delegation — run its checks to bring it on duty.",
+        ...result,
+        note: result.note || "Created, configured with its own sandbox profile, and pending live checks.",
       });
     }
     if (action === "activate") {
-      const result = await activateAgent({ root: AGENTS_ROOT, id: body?.id });
-      return sendJson(res, 200, { ok: true, ...result });
+      return sendJson(res, 200, await namedAgentManage("activate", { id: body?.id }));
     }
     if (action === "update") {
       // Same as create: the typed gate refuses an unknown key by name rather
@@ -995,22 +1061,17 @@ export async function handleAgentsPost(req, res) {
       const fields = { ...body };
       delete fields.action;
       delete fields.id;
-      const agent = await updateAgent({ root: AGENTS_ROOT, id: body?.id, fields });
-      return sendJson(res, 200, { ok: true, agent });
+      return sendJson(res, 200, await namedAgentManage("update", { id: body?.id, fields }));
     }
     if (action === "lifecycle") {
-      const agent = await setLifecycle({
-        root: AGENTS_ROOT,
-        id: body?.id,
-        lifecycle: body?.lifecycle,
-      });
-      return sendJson(res, 200, { ok: true, agent });
+      return sendJson(res, 200, await namedAgentManage("lifecycle", { id: body?.id, lifecycle: body?.lifecycle }));
     }
-    const removed = await removeAgent({ root: AGENTS_ROOT, id: body?.id });
-    return sendJson(res, 200, { ok: true, ...removed });
+    return sendJson(res, 200, await namedAgentManage("remove", { id: body?.id }));
   } catch (err) {
     // A refusal is a designed outcome and says exactly what it refused.
-    if (err instanceof AgentsRefused) return jsonError(res, 400, err.message);
+    if (err instanceof AgentsRefused || err instanceof AgentRuntimeClientRefused) {
+      return jsonError(res, err instanceof AgentRuntimeClientRefused && /unavailable|not installed/.test(err.message) ? 503 : 400, err.message);
+    }
     console.error("[orderly-web] agent write failed:", err?.code || err?.message || "unknown");
     return jsonError(res, 500, "That change couldn't be written. Nothing was altered.");
   } finally {
@@ -1026,13 +1087,13 @@ async function handleAgentThread(req, res, url) {
   const id = url.searchParams.get("agent");
   let agent = null;
   try {
-    agent = await findAgent({ root: AGENTS_ROOT, id });
+    agent = await namedAgentFind(id);
   } catch {
     agent = null;
   }
   if (!agent) return jsonError(res, 404, "That isn't an agent on this station.");
   try {
-    const turns = await readTranscript({ root: AGENTS_ROOT, id: agent.id });
+    const { turns } = await namedAgentTranscript(agent.id);
     sendJson(res, 200, {
       state: "ok",
       agent: agent.id,
@@ -1359,7 +1420,7 @@ const WRITE_COOLDOWN_MS = 5000;
 
 async function handleSettingsGet(req, res) {
   try {
-    const namedAgentIds = (await listAgents({ root: AGENTS_ROOT })).map((agent) => agent.id);
+    const namedAgentIds = await optionalNamedAgentIds();
     const [settings, gateway, service] = await Promise.all([
       readSettings({
         configPath: CONFIG_PATH,
@@ -1415,7 +1476,7 @@ async function handleSettingsPost(req, res) {
 
   writeInFlight = true;
   try {
-    const namedAgentIds = (await listAgents({ root: AGENTS_ROOT })).map((agent) => agent.id);
+    const namedAgentIds = await optionalNamedAgentIds();
     let result;
     if (edits?.replyStyle !== undefined) {
       if (Object.keys(edits).some((key) => key !== "replyStyle")) {
