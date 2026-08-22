@@ -1722,9 +1722,14 @@ async function handleReminders(_req, res) {
 // send it himself from Gmail. The wall is unchanged and the queue does not lean
 // on it being unchanged: this process has no credential that could send.
 
-async function handleQueueGet(_req, res) {
+async function handleQueueGet(req, res) {
   try {
-    const queue = await readQueue({ pendingPath: PENDING_PATH, statePath: QUEUE_STATE_PATH });
+    // `after` carries the cursor the previous response ended on, so the browser
+    // can walk past the response bound without that bound being lifted.
+    const after = new URL(req.url ?? "/", "http://station").searchParams.get("after");
+    const queue = await readQueue({
+      pendingPath: PENDING_PATH, statePath: QUEUE_STATE_PATH, after,
+    });
     // Whether an event proposal could actually be carried out, as a boolean.
     // A station whose calendar accounts are not wired shows the proposal and
     // says plainly that approving it would fail, instead of offering a button

@@ -2579,3 +2579,10 @@ main {
   font-size: 0.82rem;
   color: var(--muted-deep);
 }
+
+/* The control that reaches the rest of a bounded queue response. */
+.queue-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 2px;
+}
